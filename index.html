@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>号証つけるくん - PDF証拠番号スタンプ付与アプリ</title>
+    <meta name="description" content="PDFに自動で証拠番号（甲・乙など）のスタンプを付け、ファイル名をリネームする業務効率化アプリです。">
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+    
+    <!-- PDF libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+    <script src="https://unpkg.com/@pdf-lib/fontkit/dist/fontkit.umd.min.js"></script>
+    
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Options -->
+        <aside class="sidebar glass-panel">
+            <h1 class="app-title"><span class="icon">📄</span>号証つけるくん</h1>
+            <p class="app-subtitle">証拠番号 自動付与ツール</p>
+            
+            <div class="settings-group">
+                <h3>1. 符号・番号設定</h3>
+                
+                <div class="input-group">
+                    <label for="symbol">符号 (甲・乙...)</label>
+                    <select id="symbol" class="modern-select">
+                        <option value="甲">甲</option>
+                        <option value="乙">乙</option>
+                        <option value="丙">丙</option>
+                        <option value="丁">丁</option>
+                        <option value="戊">戊</option>
+                        <option value="疎甲">疎甲</option>
+                        <option value="疎乙">疎乙</option>
+                        <option value="弁">弁</option>
+                        <option value="資料">資料</option>
+                        <option value="custom">カスタム（自由入力）</option>
+                    </select>
+                </div>
+                
+                <div class="input-group hidden" id="customSymbolGroup">
+                    <label for="customSymbol">カスタム符号</label>
+                    <input type="text" id="customSymbol" placeholder="任意の文字を入力" class="modern-input">
+                </div>
+                
+                <div class="input-group">
+                    <label for="numberFormat">番号形式</label>
+                    <select id="numberFormat" class="modern-select">
+                        <option value="goushou">号証形式 (甲1号証)</option>
+                        <option value="mints">mints形式 (甲001)</option>
+                        <option value="simple">シンプル形式 (甲1)</option>
+                        <option value="hyphen">ハイフン形式 (甲1-2)</option>
+                        <option value="formal">正式形式 (甲第1号証)</option>
+                    </select>
+                </div>
+                
+                <div class="input-group">
+                    <label for="startNumber">開始番号</label>
+                    <input type="number" id="startNumber" value="1" min="1" class="modern-input">
+                </div>
+            </div>
+
+            <div class="settings-group">
+                <h3>2. スタンプの見た目</h3>
+                
+                <div class="input-group">
+                    <label for="fontFamily">フォント</label>
+                    <select id="fontFamily" class="modern-select">
+                        <option value="gothic">ゴシック体 (Noto Sans)</option>
+                        <option value="mincho">明朝体 (Noto Serif)</option>
+                    </select>
+                </div>
+                
+                <div class="input-group">
+                    <label for="stampColor">文字色 (赤推奨)</label>
+                    <input type="color" id="stampColor" value="#ff0000" class="color-picker">
+                </div>
+                
+                <div class="input-group">
+                    <label for="fontSize">フォントサイズ</label>
+                    <div class="range-wrapper">
+                        <input type="range" id="fontSize" min="12" max="72" value="24" class="modern-range">
+                        <span id="fontSizeDisplay">24px</span>
+                    </div>
+                </div>
+
+                <div class="checkbox-group">
+                    <label class="modern-checkbox">
+                        <input type="checkbox" id="whiteBackground" checked>
+                        <span class="checkmark"></span>
+                        背景を白で塗りつぶす
+                    </label>
+                </div>
+                
+                <div class="checkbox-group">
+                    <label class="modern-checkbox">
+                        <input type="checkbox" id="drawBorder" checked>
+                        <span class="checkmark"></span>
+                        枠線を描画する
+                    </label>
+                </div>
+                
+                <div class="input-group">
+                    <label for="position">スタンプ位置</label>
+                    <select id="position" class="modern-select">
+                        <option value="custom">カスタム (プレビューをドラッグ)</option>
+                        <option value="top-right">右上</option>
+                        <option value="top-left">左上</option>
+                        <option value="bottom-right">右下</option>
+                        <option value="bottom-left">左下</option>
+                    </select>
+                    <small class="hinttext" style="color:var(--primary); font-size:0.8em; margin-top: 4px; font-weight: 500;">
+                        💡 プレビュー画面で赤いスタンプを直接つかんで動かせます！
+                    </small>
+                </div>
+            </div>
+
+            <div class="settings-group">
+                <h3>3. 出力設定</h3>
+                
+                <div class="input-group">
+                    <label>ファイル名の形式</label>
+                    <div class="radio-group" style="display:flex; flex-direction:column; gap:8px; margin-top:8px;">
+                        <label class="modern-radio">
+                            <input type="radio" name="filenameFormat" value="symbol_only" checked>
+                            <span class="radio-mark"></span>
+                            符号・番号のみ<br>
+                            <small class="hinttext" style="color:#aaa; font-size:0.8em; margin-left: 24px;">例: 甲第1号証.pdf</small>
+                        </label>
+                        <label class="modern-radio">
+                            <input type="radio" name="filenameFormat" value="with_original">
+                            <span class="radio-mark"></span>
+                            符号・番号 ＋ 元のファイル名<br>
+                            <small class="hinttext" style="color:#aaa; font-size:0.8em; margin-left: 24px;">例: 甲第1号証_請求書.pdf</small>
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="actions-group">
+                <button id="processBtn" class="primary-btn pulse-animation">
+                    設定を反映して処理する
+                </button>
+                <div class="export-options">
+                    <button id="downloadIndividualBtn" class="secondary-btn" disabled>
+                        個別ダウンロード
+                    </button>
+                    <button id="downloadCombinedBtn" class="secondary-btn" disabled>
+                        枝番を結合してダウンロード
+                    </button>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            
+            <!-- File Drop Area -->
+            <div id="dropZone" class="drop-zone glass-panel">
+                <div class="drop-content">
+                    <div class="icon-cloud">☁️</div>
+                    <h2>PDF・画像ファイルをここにドロップ</h2>
+                    <p>または</p>
+                    <label for="fileInput" class="upload-btn">ファイルを選択</label>
+                    <input type="file" id="fileInput" multiple accept="application/pdf,image/jpeg,image/png,image/bmp" hidden>
+                    <p class="hint">Shift/Ctrlキーで複数選択できます</p>
+                </div>
+            </div>
+
+            <!-- Dashboard / Layout Split (File list & Preview) -->
+            <div class="dashboard-layout hidden" id="dashboard">
+                <!-- File List -->
+                <div class="file-list-container glass-panel">
+                    <div class="list-header">
+                        <h3>ファイル一覧 (<span id="fileCount">0</span>)</h3>
+                        <div class="list-header-actions">
+                            <label for="addFileInput" class="add-file-btn" title="ファイルを追加">＋ 追加</label>
+                            <input type="file" id="addFileInput" multiple accept="application/pdf,image/jpeg,image/png,image/bmp" hidden>
+                            <button id="clearAllBtn" class="text-btn text-danger">すべてクリア</button>
+                        </div>
+                    </div>
+                    <ul id="fileList" class="file-list">
+                        <!-- File items will be injected here -->
+                    </ul>
+                    <div id="miniDropZone" class="mini-drop-zone">
+                        ここにファイルをドロップして追加
+                    </div>
+                </div>
+
+                <!-- Preview Area -->
+                <div class="preview-container glass-panel">
+                    <h3>プレビュー</h3>
+                    <div class="preview-wrapper">
+                        <div class="canvas-container">
+                            <canvas id="pdfPreview"></canvas>
+                            <div id="previewStamp" class="preview-stamp">甲1</div>
+                        </div>
+                        <div id="previewLoading" class="preview-loading hidden">読み込み中...</div>
+                        <div id="previewPlaceholder" class="preview-placeholder">
+                            ファイルを選択してプレビューを表示
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- Script loading -->
+    <script src="app.js"></script>
+</body>
+</html>
