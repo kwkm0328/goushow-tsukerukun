@@ -417,7 +417,30 @@ body {
     margin-left: 24px;
     border-left: 3px solid var(--primary);
     background: #f8faff;
+    position: relative;
 }
+.file-item.is-branch::before {
+    content: '';
+    position: absolute;
+    left: -16px;
+    top: -8px;
+    width: 12px;
+    height: 60%;
+    border-left: 2px solid #93c5fd;
+    border-bottom: 2px solid #93c5fd;
+    border-bottom-left-radius: 8px;
+    pointer-events: none;
+}
+.branch-help {
+    font-size: 0.78rem;
+    color: #64748b;
+    background: #f1f5f9;
+    border-radius: 8px;
+    padding: 6px 10px;
+    margin: 0 0 10px;
+    line-height: 1.5;
+}
+.branch-help b { color: var(--primary); }
 .file-item:hover {
     box-shadow: var(--shadow-sm);
     border-color: #cbd5e1;
@@ -477,22 +500,35 @@ body {
     display: flex;
     gap: 6px;
 }
-.branch-toggle {
-    font-size: 1.1rem;
-    font-weight: bold;
-    min-width: 28px;
-    text-align: center;
-    color: #94a3b8;
+.branch-pill {
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 4px 8px;
+    border-radius: 999px;
+    border: 1px dashed #94a3b8;
+    background: white;
+    color: #64748b;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s;
 }
-.branch-toggle.active {
-    color: var(--primary);
-}
-.branch-toggle:hover {
+.branch-pill:hover {
+    border-color: var(--primary);
     color: var(--primary);
     background: #eff6ff;
 }
+.branch-pill.active {
+    border: 1px solid var(--primary);
+    background: var(--primary);
+    color: white;
+}
+.branch-pill.active:hover {
+    background: #dc2626;
+    border-color: #dc2626;
+}
 .branch-spacer {
-    min-width: 28px;
+    min-width: 76px;
 }
 .icon-btn {
     background: none;
@@ -596,4 +632,47 @@ canvas#pdfPreview {
     .main-content {
         height: 600px;
     }
+}
+
+/* ── 画面全体ドロップ用オーバーレイ ── */
+.drop-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9998;
+    display: none;
+    background: rgba(79, 70, 229, 0.12);
+    backdrop-filter: blur(2px);
+    pointer-events: none; /* ドラッグイベントを下の要素に通す */
+}
+.drop-overlay.visible { display: block; }
+.drop-overlay-inner {
+    position: absolute;
+    inset: 16px;
+    border: 3px dashed var(--primary, #4f46e5);
+    border-radius: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(255, 255, 255, 0.65);
+}
+.drop-overlay-icon { font-size: 56px; }
+.drop-overlay-text {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--primary, #4f46e5);
+}
+
+/* ── OCRなし警告バッジ ── */
+.ocr-warning-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    color: #b45309;
+    background: #fef3c7;
+    border: 1px solid #f59e0b;
+    border-radius: 4px;
+    padding: 1px 6px;
+    white-space: nowrap;
 }

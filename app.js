@@ -21,7 +21,8 @@ const state = {
         customX: 0,
         customY: 0,
         whiteBackground: true,
-        drawBorder: true
+        drawBorder: true,
+        a4Normalize: true
     }
 };
 
@@ -55,17 +56,21 @@ const DOM = {
     position: document.getElementById('position'),
     whiteBackground: document.getElementById('whiteBackground'),
     drawBorder: document.getElementById('drawBorder'),
+    a4Normalize: document.getElementById('a4Normalize'),
     
     // Actions
-    processBtn: document.getElementById('processBtn'),
     downloadIndividualBtn: document.getElementById('downloadIndividualBtn'),
-    downloadCombinedBtn: document.getElementById('downloadCombinedBtn')
+    downloadCombinedBtn: document.getElementById('downloadCombinedBtn'),
+    exportCsvBtn: document.getElementById('exportCsvBtn')
 };
 
 // --- Initialization & Event Listeners ---
 function init() {
     setupDragAndDrop();
     setupEventListeners();
+    // Sync UI controls to initial state (position select's first option is 'custom')
+    DOM.position.value = state.settings.position;
+    DOM.a4Normalize.checked = state.settings.a4Normalize;
 }
 
 function setupDragAndDrop() {
@@ -106,6 +111,30 @@ function setupDragAndDrop() {
     });
     DOM.miniDropZone.addEventListener('drop', handleDrop, false);
     DOM.miniDropZone.addEventListener('click', () => DOM.addFileInput.click(), false);
+
+    // ── 画面全体をドロップ対象にする ──
+    // dropZone / miniDropZone 上のドロップは各ハンドラがstopPropagationするため二重処理にならない
+    const overlay = document.getElementById('dropOverlay');
+    let dragDepth = 0;
+
+    document.addEventListener('dragenter', (e) => {
+        if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes('Files')) return;
+        dragDepth++;
+        overlay.classList.add('visible');
+    }, false);
+
+    document.addEventListener('dragleave', () => {
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) overlay.classList.remove('visible');
+    }, false);
+
+    document.addEventListener('drop', (e) => {
+        dragDepth = 0;
+        overlay.classList.remove('visible');
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            handleFiles(e.dataTransfer.files);
+        }
+    }, false);
 }
 
 function setupEventListeners() {
@@ -167,23 +196,195 @@ function setupEventListeners() {
         updatePreviewStampStyle();
     });
 
+    DOM.a4Normalize.addEventListener('change', (e) => {
+        state.settings.a4Normalize = e.target.checked;
+    });
+
     setupStampDrag();
 
     // List Actions
     DOM.clearAllBtn.addEventListener('click', clearAllFiles);
-    
+
     // Process Actions
-    DOM.processBtn.addEventListener('click', async () => {
-        // Simple logic for single processing just for testing, 
-        // real processing logic will be hooked to download buttons
-        alert('設定を適用しました。ダウンロードボタンから出力してください。');
-    });
-    
     DOM.downloadIndividualBtn.addEventListener('click', processAndDownloadIndividual);
     DOM.downloadCombinedBtn.addEventListener('click', processAndDownloadCombined);
+    DOM.exportCsvBtn.addEventListener('click', exportShoukoSetsumeiCsv);
+
+    // Ctrl+V clipboard paste (screenshots etc.)
+    document.addEventListener('paste', (e) => {
+        const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+        const imageFiles = [];
+        for (const item of items) {
+            if (item.kind === 'file' && item.type.startsWith('image/')) {
+                const f = item.getAsFile();
+                if (f) imageFiles.push(f);
+            }
+        }
+        if (imageFiles.length > 0) handleFiles(imageFiles);
+    });
 }
 
 // --- File Handling ---
+function getFileCategory(file) {
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (file.type === 'application/pdf' || ext === 'pdf') return 'pdf';
+    if (file.type.startsWith('image/') || ['jpg','jpeg','png','gif','bmp','webp','tiff','tif'].includes(ext)) return 'image';
+    if (['docx','doc'].includes(ext) || file.type.includes('word')) return 'docx';
+    if (['xlsx','xls'].includes(ext) || file.type.includes('sheet') || file.type.includes('excel')) return 'xlsx';
+    if (ext === 'csv' || file.type === 'text/csv') return 'csv';
+    if (ext === 'txt' || file.type === 'text/plain') return 'txt';
+    return null;
+}
+
+async function renderHtmlToPdfBuffer(htmlContent, isPreformatted) {
+    const A4_W = 794;
+    const SCALE = 1.5;
+    const container = document.createElement('div');
+    container.style.cssText = `position:fixed;left:-9999px;top:0;width:${A4_W}px;padding:40px 48px;background:white;font-size:13.5px;line-height:1.7;font-family:'Meiryo','Yu Gothic UI',sans-serif;${isPreformatted ? 'white-space:pre-wrap;font-family:monospace;font-size:12px;' : ''}`;
+    container.innerHTML = htmlContent;
+    document.body.appendChild(container);
+
+    const bigCanvas = await html2canvas(container, { scale: SCALE, useCORS: true, logging: false, backgroundColor: '#ffffff' });
+    document.body.removeChild(container);
+
+    const pageW = bigCanvas.width;
+    const pageH = Math.round(1122 * SCALE); // A4 height at 96dpi × scale
+    const totalH = bigCanvas.height;
+    const pageCount = Math.max(1, Math.ceil(totalH / pageH));
+
+    const pdfDoc = await PDFLib.PDFDocument.create();
+    const A4_W_PT = 595.28;
+    const A4_H_PT = 841.89;
+
+    for (let p = 0; p < pageCount; p++) {
+        const sliceH = Math.min(pageH, totalH - p * pageH);
+        const sliceCanvas = document.createElement('canvas');
+        sliceCanvas.width = pageW;
+        sliceCanvas.height = sliceH;
+        sliceCanvas.getContext('2d').drawImage(bigCanvas, 0, p * pageH, pageW, sliceH, 0, 0, pageW, sliceH);
+
+        const dataUrl = sliceCanvas.toDataURL('image/jpeg', 0.92);
+        const imgBytes = Uint8Array.from(atob(dataUrl.split(',')[1]), c => c.charCodeAt(0));
+        const pdfImage = await pdfDoc.embedJpg(imgBytes);
+
+        const imgScale = A4_W_PT / pdfImage.width;
+        const drawnH = pdfImage.height * imgScale;
+        // 常にフルサイズのA4ページを作り、内容を上詰めで配置する（mints対応）
+        const page = pdfDoc.addPage([A4_W_PT, A4_H_PT]);
+        page.drawImage(pdfImage, { x: 0, y: A4_H_PT - drawnH, width: A4_W_PT, height: drawnH });
+    }
+
+    return await pdfDoc.save();
+}
+
+async function fileToNamedPdfBuffer(file) {
+    const cat = getFileCategory(file);
+    const baseName = file.name.replace(/\.[^/.]+$/, '');
+
+    if (cat === 'pdf') {
+        return { name: file.name, buffer: await file.arrayBuffer() };
+    }
+
+    if (cat === 'image') {
+        const rawBuffer = await file.arrayBuffer();
+        const pdfDoc = await PDFLib.PDFDocument.create();
+        let image;
+
+        if (file.type === 'image/jpeg' || file.name.toLowerCase().match(/\.jpe?g$/)) {
+            image = await pdfDoc.embedJpg(rawBuffer);
+        } else if (file.type === 'image/png' || file.name.toLowerCase().endsWith('.png')) {
+            image = await pdfDoc.embedPng(rawBuffer);
+        } else {
+            // BMP / GIF / WebP / TIFF → convert via Canvas
+            const img = new Image();
+            const url = URL.createObjectURL(file);
+            await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+            const cvs = document.createElement('canvas');
+            cvs.width = img.naturalWidth; cvs.height = img.naturalHeight;
+            cvs.getContext('2d').drawImage(img, 0, 0);
+            URL.revokeObjectURL(url);
+            const pngBytes = Uint8Array.from(atob(cvs.toDataURL('image/png').split(',')[1]), c => c.charCodeAt(0));
+            image = await pdfDoc.embedPng(pngBytes);
+        }
+
+        const MAX_DIM = 841.89;
+        const scale = (image.width > MAX_DIM || image.height > MAX_DIM)
+            ? MAX_DIM / Math.max(image.width, image.height) : 1;
+        const w = image.width * scale;
+        const h = image.height * scale;
+        const page = pdfDoc.addPage([w, h]);
+        page.drawImage(image, { x: 0, y: 0, width: w, height: h });
+        return { name: baseName + '.pdf', buffer: await pdfDoc.save() };
+    }
+
+    if (cat === 'docx') {
+        if (typeof mammoth === 'undefined') throw new Error('mammoth.js が読み込まれていません');
+        const rawBuffer = await file.arrayBuffer();
+        const result = await mammoth.convertToHtml({ arrayBuffer: rawBuffer });
+        const buffer = await renderHtmlToPdfBuffer(result.value, false);
+        return { name: baseName + '.pdf', buffer };
+    }
+
+    if (cat === 'xlsx') {
+        if (typeof XLSX === 'undefined') throw new Error('SheetJS が読み込まれていません');
+        const rawBuffer = await file.arrayBuffer();
+        const workbook = XLSX.read(rawBuffer, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const htmlTable = XLSX.utils.sheet_to_html(workbook.Sheets[sheetName]);
+        const styledHtml = `<style>table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:4px 8px;font-size:12px}</style>${htmlTable}`;
+        const buffer = await renderHtmlToPdfBuffer(styledHtml, false);
+        return { name: baseName + '.pdf', buffer };
+    }
+
+    if (cat === 'csv' || cat === 'txt') {
+        const rawBuffer = await file.arrayBuffer();
+        const text = new TextDecoder('utf-8').decode(rawBuffer);
+        const escaped = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        const buffer = await renderHtmlToPdfBuffer(escaped, true);
+        return { name: baseName + '.pdf', buffer };
+    }
+
+    return null;
+}
+
+function showConvertingOverlay(msg) {
+    let el = document.getElementById('convertingOverlay');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'convertingOverlay';
+        el.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.78);color:white;padding:18px 32px;border-radius:12px;z-index:9999;font-size:15px;pointer-events:none;';
+        document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.style.display = 'block';
+}
+
+function hideConvertingOverlay() {
+    const el = document.getElementById('convertingOverlay');
+    if (el) el.style.display = 'none';
+}
+
+/**
+ * PDF先頭3ページのテキストを抽出する。
+ * hasText: テキストレイヤー有無（mintsはOCR済みPDFが望ましいため、無い場合は一覧で警告）
+ * text: 抽出テキスト（証拠説明書下書きの推測に使用）
+ */
+async function probePdfText(buffer) {
+    try {
+        const pdf = await pdfjsLib.getDocument({ data: buffer.slice(0) }).promise;
+        const pagesToCheck = Math.min(3, pdf.numPages);
+        let text = '';
+        for (let p = 1; p <= pagesToCheck; p++) {
+            const tc = await (await pdf.getPage(p)).getTextContent();
+            text += tc.items.map(i => i.str).join('') + '\n';
+        }
+        return { hasText: text.trim().length > 0, text };
+    } catch (e) {
+        console.warn('テキスト抽出に失敗:', e);
+        return { hasText: null, text: '' };
+    }
+}
+
 function handleDrop(e) {
     if (e.dataTransfer && e.dataTransfer.files) {
         handleFiles(e.dataTransfer.files);
@@ -193,90 +394,46 @@ function handleDrop(e) {
 function handleFileSelect(e) {
     const files = e.target.files;
     handleFiles(files);
-    e.target.value = ''; // Reset so the same file can be added again
+    e.target.value = '';
 }
 
 async function handleFiles(fileList) {
-    const validFiles = Array.from(fileList).filter(file => 
-        file.type === 'application/pdf' || 
-        file.type.startsWith('image/')
-    );
+    const validFiles = Array.from(fileList).filter(f => getFileCategory(f) !== null);
     if (validFiles.length === 0) return;
 
-    // Show dashboard
     DOM.dashboard.classList.remove('hidden');
     DOM.dropZone.style.display = 'none';
 
-    for (let file of validFiles) {
-        const id = 'file_' + Math.random().toString(36).substr(2, 9);
-        let arrayBuffer = await file.arrayBuffer();
-        let pdfName = file.name;
-        
-        // If it's an image, convert to PDF
-        if (file.type.startsWith('image/')) {
-            try {
-                const pdfDoc = await PDFLib.PDFDocument.create();
-                let image;
-                if (file.type === 'image/jpeg') {
-                    image = await pdfDoc.embedJpg(arrayBuffer);
-                } else if (file.type === 'image/png') {
-                    image = await pdfDoc.embedPng(arrayBuffer);
-                } else {
-                    // Fallback or skip if unsupported image type (e.g. some BMPs might not be directly supported, but let's try)
-                    console.warn('Unsupported image type for direct embed', file.type);
-                    continue; // Skip for now if we can't embed
-                }
-                
-                // Calculate scaled dimensions (fit to A4 roughly)
-                const MAX_DIM = 841.89; // A4 max dimension in points
-                let scale = 1;
-
-                if (image.width > MAX_DIM || image.height > MAX_DIM) {
-                    if (image.width > image.height) {
-                        scale = MAX_DIM / image.width;
-                    } else {
-                        scale = MAX_DIM / image.height;
-                    }
-                }
-                
-                const finalWidth = image.width * scale;
-                const finalHeight = image.height * scale;
-
-                const page = pdfDoc.addPage([finalWidth, finalHeight]);
-                page.drawImage(image, {
-                    x: 0,
-                    y: 0,
-                    width: finalWidth,
-                    height: finalHeight,
-                });
-                
-                // Replace the original image arrayBuffer with the new PDF arrayBuffer
-                arrayBuffer = await pdfDoc.save();
-                
-                // Replace file extension
-                pdfName = file.name.replace(/\.[^/.]+$/, "") + ".pdf";
-                
-            } catch (err) {
-                console.error('Failed to convert image to PDF:', err);
-                continue;
-            }
+    for (const file of validFiles) {
+        showConvertingOverlay(`変換中: ${file.name}`);
+        try {
+            const result = await fileToNamedPdfBuffer(file);
+            if (!result) continue;
+            const probe = await probePdfText(result.buffer);
+            state.files.push({
+                id: 'file_' + Math.random().toString(36).substr(2, 9),
+                file,
+                originalName: result.name,
+                arrayBuffer: result.buffer,
+                isBranch: false,
+                // OCR警告は元からPDFだったものだけ対象
+                // （画像・Word等からの変換は文字なしが前提のため警告しない）
+                hasTextLayer: getFileCategory(file) === 'pdf' ? probe.hasText : null,
+                extractedText: probe.text
+            });
+        } catch (err) {
+            console.error('Failed to process file:', file.name, err);
+            alert(`${file.name} の処理に失敗しました:\n${err.message}`);
         }
-        
-        state.files.push({
-            id,
-            file,
-            originalName: pdfName,
-            arrayBuffer,
-            isBranch: false
-        });
     }
 
+    hideConvertingOverlay();
     renderFileList();
-    
+
     if (state.files.length > 0 && !state.selectedFileId) {
         selectFile(state.files[0].id);
     }
-    
+
     updateDownloadButtonsState();
 }
 
@@ -298,8 +455,8 @@ function renderFileList() {
 
         // Branch toggle: only show for index > 0
         const branchBtnHtml = index > 0
-            ? `<button class="icon-btn branch-toggle ${fileObj.isBranch ? 'active' : ''}" onclick="toggleBranch('${fileObj.id}', event)" title="${fileObj.isBranch ? '枝番を解除' : '前の号証の枝番にする'}">
-                ${fileObj.isBranch ? '↳' : '┃'}
+            ? `<button class="branch-pill ${fileObj.isBranch ? 'active' : ''}" onclick="toggleBranch('${fileObj.id}', event)" title="${fileObj.isBranch ? 'クリックで枝番を解除して独立した号証に戻す' : 'クリックで、すぐ上のファイルの枝番（の2, の3…）にする'}">
+                ${fileObj.isBranch ? '↳ 枝番' : '枝番にする'}
                </button>`
             : '<div class="branch-spacer"></div>';
 
@@ -311,6 +468,7 @@ function renderFileList() {
                 <div class="file-meta">
                     <span class="stamp-preview-badge">${numberText}</span>
                     <span>${(fileObj.file.size / 1024 / 1024).toFixed(2)} MB</span>
+                    ${fileObj.hasTextLayer === false ? '<span class="ocr-warning-badge" title="文字検索できないスキャンPDFです。mints提出はOCR済みPDFが望ましいため、必要ならOCRを掛けてから投入してください。">⚠ OCRなし</span>' : ''}
                 </div>
             </div>
             <div class="file-actions">
@@ -447,6 +605,7 @@ function updateDownloadButtonsState() {
     const hasFiles = state.files.length > 0;
     DOM.downloadIndividualBtn.disabled = !hasFiles;
     DOM.downloadCombinedBtn.disabled = !hasFiles;
+    DOM.exportCsvBtn.disabled = !hasFiles;
 }
 
 // --- Stamp Text Generation Logic ---
@@ -493,39 +652,42 @@ function computeNumbering() {
     return result;
 }
 
+function generateBaseText(mainNum) {
+    const sym = getActualSymbol();
+    const format = state.settings.format;
+
+    if (format === 'mints') return `${sym}${mainNum.toString().padStart(3, '0')}`;
+    if (format === 'formal') return `${sym}第${mainNum}号証`;
+    if (format === 'goushou') return `${sym}${mainNum}号証`;
+    return `${sym}${mainNum}`; // simple / hyphen / fallback
+}
+
 function generateStampText(index) {
     const numbering = computeNumbering();
     if (index < 0 || index >= numbering.length) return '';
 
     const { mainNum, branchNum, hasBranches } = numbering[index];
-    const sym = getActualSymbol();
     const format = state.settings.format;
-    const paddedNum = mainNum.toString().padStart(3, '0');
-
-    let base;
-    if (format === 'mints') {
-        base = `${sym}${paddedNum}`;
-    } else if (format === 'simple') {
-        base = `${sym}${mainNum}`;
-    } else if (format === 'hyphen') {
-        base = `${sym}${mainNum}`;
-    } else if (format === 'formal') {
-        base = `${sym}第${mainNum}号証`;
-    } else if (format === 'goushou') {
-        base = `${sym}${mainNum}号証`;
-    } else {
-        base = `${sym}${mainNum}`;
-    }
+    let base = generateBaseText(mainNum);
 
     // Append branch suffix only if this group has multiple files
     if (hasBranches) {
-        if (format === 'hyphen') {
+        if (format === 'hyphen' || format === 'mints') {
+            // mints推奨表記: 甲001-1, 甲001-2
             base += `-${branchNum}`;
         } else {
             base += `の${branchNum}`;
         }
     }
 
+    return base;
+}
+
+// mints等のファイル名規則対応: 禁止記号を除去し、拡張子込み50文字以内に収める
+function sanitizeFileName(name) {
+    let base = name.replace(/[\\/:*?"<>|]/g, '_').trim();
+    const MAX_BASE = 46; // 46文字 + ".pdf" = 50文字
+    if (base.length > MAX_BASE) base = base.slice(0, MAX_BASE);
     return base;
 }
 
@@ -761,19 +923,82 @@ function hexToRgb(hex) {
     } : { r: 1, g: 0, b: 0 };
 }
 
-async function addStampToPdfDoc(pdfDoc, text) {
-    const { rgb } = PDFLib;
-    
-    // Fetch a base font based on user setting
-    let fontUrl = 'https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf'; // default Gothic
-    if (state.settings.fontFamily === 'mincho') {
-        fontUrl = 'https://raw.githubusercontent.com/notofonts/noto-cjk/main/Serif/OTF/Japanese/NotoSerifCJKjp-Regular.otf';
+// --- A4 Normalization (mints対応) ---
+const A4_PORTRAIT = { w: 595.28, h: 841.89 };
+
+function isA4Size(w, h) {
+    const TOL = 2; // pt
+    const near = (a, b) => Math.abs(a - b) <= TOL;
+    return (near(w, A4_PORTRAIT.w) && near(h, A4_PORTRAIT.h)) ||
+           (near(w, A4_PORTRAIT.h) && near(h, A4_PORTRAIT.w));
+}
+
+/**
+ * 全ページをA4（縦横は元ページの向きに合わせる）へ拡大縮小・センタリングした
+ * 新しいPDFDocumentを返す。全ページが既にA4なら元のdocをそのまま返す。
+ */
+async function normalizeToA4(pdfDoc) {
+    const pages = pdfDoc.getPages();
+    if (pages.every(p => { const s = p.getSize(); return isA4Size(s.width, s.height); })) {
+        return pdfDoc; // 既にA4：テキストレイヤー保持のため無変換
     }
 
-    const fontBytes = await fetch(fontUrl).then(res => res.arrayBuffer());
-    
+    const out = await PDFLib.PDFDocument.create();
+    const embedded = await out.embedPages(pages);
+    for (const ep of embedded) {
+        const landscape = ep.width > ep.height;
+        const pw = landscape ? A4_PORTRAIT.h : A4_PORTRAIT.w;
+        const ph = landscape ? A4_PORTRAIT.w : A4_PORTRAIT.h;
+        const scale = Math.min(pw / ep.width, ph / ep.height);
+        const w = ep.width * scale;
+        const h = ep.height * scale;
+        const page = out.addPage([pw, ph]);
+        page.drawPage(ep, { x: (pw - w) / 2, y: (ph - h) / 2, width: w, height: h });
+    }
+    return out;
+}
+
+async function mergePdfDocs(docs) {
+    if (docs.length === 1) return docs[0];
+    const out = await PDFLib.PDFDocument.create();
+    for (const doc of docs) {
+        const pages = await out.copyPages(doc, doc.getPageIndices());
+        pages.forEach(p => out.addPage(p));
+    }
+    return out;
+}
+
+async function ensureFontkit() {
+    if (window.fontkit) return;
+    await new Promise((resolve) => {
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/@pdf-lib/fontkit/dist/fontkit.umd.min.js';
+        script.onload = resolve;
+        document.head.appendChild(script);
+    });
+}
+
+// フォントは1回だけ取得してキャッシュ（従来はファイルごとに毎回ダウンロードしていた）
+const stampFontCache = {};
+async function getStampFontBytes() {
+    const key = state.settings.fontFamily === 'mincho' ? 'mincho' : 'gothic';
+    if (!stampFontCache[key]) {
+        const fontUrl = key === 'mincho'
+            ? 'https://raw.githubusercontent.com/notofonts/noto-cjk/main/Serif/OTF/Japanese/NotoSerifCJKjp-Regular.otf'
+            : 'https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf';
+        stampFontCache[key] = await fetch(fontUrl).then(res => res.arrayBuffer());
+    }
+    return stampFontCache[key];
+}
+
+async function addStampToPdfDoc(pdfDoc, text) {
+    const { rgb } = PDFLib;
+
+    const fontBytes = await getStampFontBytes();
+
     pdfDoc.registerFontkit(window.fontkit); // Requires fontkit to be loaded
-    const customFont = await pdfDoc.embedFont(fontBytes);
+    // subset: true が無いとフォント全体(約13MB)が埋め込まれ、mintsの容量制限に抵触する
+    const customFont = await pdfDoc.embedFont(fontBytes, { subset: true });
 
     const pages = pdfDoc.getPages();
     const firstPage = pages[0];
@@ -869,47 +1094,48 @@ function downloadByteArray(fileName, byte) {
     link.click();
 }
 
+// 1ファイル分を読み込み、A4統一（設定時）とスタンプ付与を行って返す
+async function buildStampedDoc(index) {
+    const fileObj = state.files[index];
+    let pdfDoc = await PDFLib.PDFDocument.load(fileObj.arrayBuffer.slice(0));
+    if (state.settings.a4Normalize) {
+        pdfDoc = await normalizeToA4(pdfDoc);
+    }
+    await addStampToPdfDoc(pdfDoc, generateStampText(index));
+    return pdfDoc;
+}
+
 async function processAndDownloadIndividual() {
-    DOM.processBtn.textContent = '処理中...';
-    DOM.processBtn.disabled = true;
-    
+    DOM.downloadIndividualBtn.textContent = '処理中...';
+    DOM.downloadIndividualBtn.disabled = true;
+
     try {
-        if (!window.fontkit) {
-            // dynamically load fontkit if missing
-            await new Promise((resolve) => {
-                const script = document.createElement('script');
-                script.src = 'https://unpkg.com/@pdf-lib/fontkit/dist/fontkit.umd.min.js';
-                script.onload = resolve;
-                document.head.appendChild(script);
-            });
-        }
+        await ensureFontkit();
 
         for (let i = 0; i < state.files.length; i++) {
             const fileObj = state.files[i];
             const text = generateStampText(i);
-            
-            const pdfDoc = await PDFLib.PDFDocument.load(fileObj.arrayBuffer.slice(0));
-            await addStampToPdfDoc(pdfDoc, text);
-            
+
+            showConvertingOverlay(`処理中: ${text}`);
+            const pdfDoc = await buildStampedDoc(i);
             const pdfBytes = await pdfDoc.save();
-            
+
             // Generate filename based on user preference
             const formatSetting = document.querySelector('input[name="filenameFormat"]:checked').value;
             let finalName;
-            
+
             if (formatSetting === 'symbol_only') {
                 finalName = text; // Just the stamp text itself, e.g. 甲1号証
+            } else if (formatSetting === 'original_only') {
+                // タイトルそのまま：元のファイル名を維持（スタンプだけ付与）
+                finalName = fileObj.originalName.replace(/\.pdf$/i, '');
             } else {
                 const prefix = text.replace(/号証$/, '').replace(/第/, ''); // 簡易的なファイル名プレフィックス
-                finalName = `${prefix}_${fileObj.originalName}`;
+                finalName = `${prefix}_${fileObj.originalName.replace(/\.pdf$/i, '')}`;
             }
-            // Ensure .pdf extension
-            if (!finalName.toLowerCase().endsWith('.pdf')) {
-                finalName += '.pdf';
-            }
-            
-            downloadByteArray(finalName, pdfBytes);
-            
+
+            downloadByteArray(sanitizeFileName(finalName), pdfBytes);
+
             // tiny delay to prevent browser crash
             await new Promise(r => setTimeout(r, 200));
         }
@@ -917,13 +1143,166 @@ async function processAndDownloadIndividual() {
         console.error('Processing error:', err);
         alert(`処理中にエラーが発生しました。\n詳細: ${err.message}`);
     } finally {
-        DOM.processBtn.textContent = '設定を反映して処理する';
-        DOM.processBtn.disabled = false;
+        hideConvertingOverlay();
+        DOM.downloadIndividualBtn.textContent = '個別ダウンロード';
+        DOM.downloadIndividualBtn.disabled = state.files.length === 0;
     }
 }
 
+/**
+ * mints提出用：枝番を親番号ごとに1つのPDFへ結合してダウンロードする。
+ * 各構成ファイルの1ページ目にはそれぞれの号証番号（甲001-1等）をスタンプする。
+ * ファイル名は mints の慣行（例: 甲001_1〜3.pdf）に合わせる。
+ */
 async function processAndDownloadCombined() {
-    alert('結合ダウンロード機能は開発中です。');
+    if (state.files.length === 0) return;
+    DOM.downloadCombinedBtn.textContent = '処理中...';
+    DOM.downloadCombinedBtn.disabled = true;
+
+    try {
+        await ensureFontkit();
+
+        // 親番号（mainNum）ごとに、連続した枝番グループを作る
+        const numbering = computeNumbering();
+        const groups = [];
+        for (let i = 0; i < state.files.length; i++) {
+            const last = groups[groups.length - 1];
+            if (last && last.mainNum === numbering[i].mainNum) {
+                last.indices.push(i);
+            } else {
+                groups.push({ mainNum: numbering[i].mainNum, indices: [i] });
+            }
+        }
+
+        for (const group of groups) {
+            const base = generateBaseText(group.mainNum);
+            showConvertingOverlay(`結合中: ${base}`);
+
+            const stampedDocs = [];
+            for (const i of group.indices) {
+                stampedDocs.push(await buildStampedDoc(i));
+            }
+            const merged = await mergePdfDocs(stampedDocs);
+            const pdfBytes = await merged.save();
+
+            // ファイル名：枝番ありは「甲001_1〜3」形式、単独は号証番号のみ
+            let name;
+            if (group.indices.length > 1) {
+                name = `${base}_1〜${group.indices.length}`;
+            } else {
+                name = base;
+            }
+            downloadByteArray(sanitizeFileName(name), pdfBytes);
+
+            await new Promise(r => setTimeout(r, 200));
+        }
+    } catch (err) {
+        console.error('Combine error:', err);
+        alert(`結合処理中にエラーが発生しました。\n詳細: ${err.message}`);
+    } finally {
+        hideConvertingOverlay();
+        DOM.downloadCombinedBtn.textContent = '枝番を結合してダウンロード（mints用）';
+        DOM.downloadCombinedBtn.disabled = state.files.length === 0;
+    }
+}
+
+// ── 証拠説明書下書きの推測ロジック ──
+
+// 書類種別ごとの既定値（ファイル名・本文に含まれる語で判定。上から順に優先）
+const DOC_TYPE_RULES = [
+    { re: /賃貸借契約/, author: '当事者双方', purpose: '賃貸借契約締結の事実及びその内容' },
+    { re: /雇用契約|労働契約/, author: '当事者双方', purpose: '雇用契約締結の事実及びその内容' },
+    { re: /金銭消費貸借|借用証/, author: '当事者双方', purpose: '金銭消費貸借契約締結の事実及びその内容' },
+    { re: /示談書|合意書|和解/, author: '当事者双方', purpose: '合意成立の事実及びその内容' },
+    { re: /契約書|覚書/, author: '当事者双方', purpose: '契約締結の事実及びその内容' },
+    { re: /内容証明|催告書|通知書|受任通知/, author: '', purpose: '通知（催告）の事実及びその内容' },
+    { re: /請求書/, author: '', purpose: '請求の事実及びその金額' },
+    { re: /領収書|レシート/, author: '', purpose: '支払の事実及びその金額' },
+    { re: /見積/, author: '', purpose: '見積の内容' },
+    { re: /登記事項証明書|全部事項証明書|登記簿/, author: '法務局登記官', purpose: '本件不動産（法人）の登記上の権利関係' },
+    { re: /戸籍|住民票/, author: '市区町村長', purpose: '当事者の身分関係（住所）' },
+    { re: /診断書/, author: '医師', purpose: '傷病名、治療経過及び症状の内容' },
+    { re: /診療報酬明細|レセプト/, author: '医療機関', purpose: '治療内容及び治療費の額' },
+    { re: /源泉徴収票|給与明細|課税証明/, author: '', purpose: '収入の額' },
+    { re: /陳述書/, author: '', purpose: '本件の経緯' },
+    { re: /議事録/, author: '', purpose: '会議における協議・決議の内容' },
+    { re: /就業規則/, author: '', purpose: '就業規則の定めの内容' },
+    { re: /メール|LINE|ライン|チャット|メッセージ/, author: '', purpose: '当事者間のやり取りの存在及びその内容' },
+    { re: /写真|スクリーンショット|スクショ/, author: '', purpose: '本件現場（対象物）の状況' },
+    { re: /図面|見取図/, author: '', purpose: '本件現場（対象物）の位置関係' },
+];
+
+// テキスト・ファイル名から日付らしき文字列を1つ拾う（全角数字は半角化）
+function guessDate(name, text) {
+    const normalize = (s) => s.replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+    const hay = normalize(text || '');
+    const wareki = hay.match(/(令和|平成|昭和)\s*(元|\d{1,2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+    if (wareki) return wareki[0].replace(/\s+/g, '');
+    const seireki = hay.match(/(19|20)\d{2}\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+    if (seireki) return seireki[0].replace(/\s+/g, '');
+    // ファイル名の日付（例: スクリーンショット 2026-07-24、20260724）
+    const n = normalize(name);
+    const fn = n.match(/(19|20)(\d{2})[-_.\/年]?(\d{1,2})[-_.\/月]?(\d{1,2})/);
+    if (fn) return `${fn[1]}${fn[2]}年${parseInt(fn[3], 10)}月${parseInt(fn[4], 10)}日`;
+    return '';
+}
+
+// 会社名・法人名らしき文字列を本文から1つ拾う（請求書・領収書等の作成者候補）
+function guessCompany(text) {
+    const m = (text || '').match(/(株式会社|有限会社|合同会社|弁護士法人|司法書士法人|税理士法人|医療法人)[^\s、。，,()（）]{1,20}|[^\s、。，,()（）]{2,20}(株式会社|有限会社|合同会社)/);
+    return m ? m[0] : '';
+}
+
+/**
+ * 書類の内容（ファイル名＋抽出テキスト）から証拠説明書の各欄を推測する。
+ * 確実に分からない欄は空欄のまま返す（あくまで下書き用の仮埋め）。
+ */
+function guessDocMeta(fileObj) {
+    const name = fileObj.originalName.replace(/\.pdf$/i, '');
+    const text = (fileObj.extractedText || '').slice(0, 3000);
+    const hay = name + '\n' + text.slice(0, 500);
+
+    let author = '';
+    let purpose = '';
+    let matchedRule = null;
+    for (const rule of DOC_TYPE_RULES) {
+        if (rule.re.test(hay)) { matchedRule = rule; break; }
+    }
+    if (matchedRule) {
+        author = matchedRule.author;
+        purpose = matchedRule.purpose;
+    }
+
+    // 発行者系の書類は本文の法人名を作成者候補にする
+    if (!author && matchedRule && /請求書|領収書|レシート|見積|診療報酬|源泉徴収/.test(matchedRule.re.source)) {
+        author = guessCompany(text);
+    }
+
+    return { date: guessDate(name, text), author, purpose };
+}
+
+/**
+ * 証拠説明書の下書きをCSV（UTF-8 BOM付き・Excelでそのまま開ける）で出力する。
+ * 号証番号・標目を自動記入し、作成年月日・作成者・立証趣旨は内容から推測できる範囲で仮埋めする。
+ */
+function exportShoukoSetsumeiCsv() {
+    if (state.files.length === 0) return;
+
+    const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
+    const rows = [['号証', '標目', '原本・写しの別', '作成年月日', '作成者', '立証趣旨']];
+
+    for (let i = 0; i < state.files.length; i++) {
+        const title = state.files[i].originalName.replace(/\.pdf$/i, '');
+        const guess = guessDocMeta(state.files[i]);
+        rows.push([generateStampText(i), title, '写し', guess.date, guess.author, guess.purpose]);
+    }
+
+    const csv = '﻿' + rows.map(r => r.map(esc).join(',')).join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const link = document.createElement('a');
+    link.href = window.URL.createObjectURL(blob);
+    link.download = `証拠説明書下書き_${getActualSymbol()}.csv`;
+    link.click();
 }
 
 // Initialize on Load

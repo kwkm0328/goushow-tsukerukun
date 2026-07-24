@@ -15,15 +15,19 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
     <script src="https://unpkg.com/@pdf-lib/fontkit/dist/fontkit.umd.min.js"></script>
+    <!-- Document conversion libraries -->
+    <script src="https://unpkg.com/mammoth@1.6.0/mammoth.browser.min.js"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=20260724">
 </head>
 <body>
     <div class="app-container">
         <!-- Sidebar Options -->
         <aside class="sidebar glass-panel">
             <h1 class="app-title"><span class="icon">📄</span>号証つけるくん</h1>
-            <p class="app-subtitle">証拠番号 自動付与ツール</p>
+            <p class="app-subtitle">証拠番号 自動付与ツール <span style="display:inline-block;font-size:0.72em;color:#16a34a;border:1px solid #16a34a;border-radius:4px;padding:0 5px;vertical-align:middle;">v2026.07.24 A4・mints対応</span></p>
             
             <div class="settings-group">
                 <h3>1. 符号・番号設定</h3>
@@ -123,7 +127,15 @@
 
             <div class="settings-group">
                 <h3>3. 出力設定</h3>
-                
+
+                <div class="checkbox-group">
+                    <label class="modern-checkbox">
+                        <input type="checkbox" id="a4Normalize" checked>
+                        <span class="checkmark"></span>
+                        A4サイズに統一して出力（mints対応）
+                    </label>
+                </div>
+
                 <div class="input-group">
                     <label>ファイル名の形式</label>
                     <div class="radio-group" style="display:flex; flex-direction:column; gap:8px; margin-top:8px;">
@@ -139,20 +151,26 @@
                             符号・番号 ＋ 元のファイル名<br>
                             <small class="hinttext" style="color:#aaa; font-size:0.8em; margin-left: 24px;">例: 甲第1号証_請求書.pdf</small>
                         </label>
+                        <label class="modern-radio">
+                            <input type="radio" name="filenameFormat" value="original_only">
+                            <span class="radio-mark"></span>
+                            元のファイル名のまま（タイトルそのまま）<br>
+                            <small class="hinttext" style="color:#aaa; font-size:0.8em; margin-left: 24px;">例: 請求書.pdf（スタンプだけ付与）</small>
+                        </label>
                     </div>
                 </div>
             </div>
 
             <div class="actions-group">
-                <button id="processBtn" class="primary-btn pulse-animation">
-                    設定を反映して処理する
+                <button id="downloadIndividualBtn" class="primary-btn" disabled>
+                    個別ダウンロード
                 </button>
                 <div class="export-options">
-                    <button id="downloadIndividualBtn" class="secondary-btn" disabled>
-                        個別ダウンロード
+                    <button id="downloadCombinedBtn" class="secondary-btn" disabled title="mints提出用：枝番を親番号ごとに1つのPDFへ結合します">
+                        枝番を結合してダウンロード（mints用）
                     </button>
-                    <button id="downloadCombinedBtn" class="secondary-btn" disabled>
-                        枝番を結合してダウンロード
+                    <button id="exportCsvBtn" class="secondary-btn" disabled title="号証一覧から証拠説明書の下書き（Excelで開けるCSV）を出力します">
+                        証拠説明書の下書き（CSV）
                     </button>
                 </div>
             </div>
@@ -165,11 +183,11 @@
             <div id="dropZone" class="drop-zone glass-panel">
                 <div class="drop-content">
                     <div class="icon-cloud">☁️</div>
-                    <h2>PDF・画像ファイルをここにドロップ</h2>
+                    <h2>PDF・画像・Word・Excelなど何でもドロップ</h2>
                     <p>または</p>
                     <label for="fileInput" class="upload-btn">ファイルを選択</label>
-                    <input type="file" id="fileInput" multiple accept="application/pdf,image/jpeg,image/png,image/bmp" hidden>
-                    <p class="hint">Shift/Ctrlキーで複数選択できます</p>
+                    <input type="file" id="fileInput" multiple accept="application/pdf,image/*,.docx,.doc,.xlsx,.xls,.csv,.txt" hidden>
+                    <p class="hint">Shift/Ctrlで複数選択 ／ スクショはCtrl+Vで貼り付け可</p>
                 </div>
             </div>
 
@@ -181,15 +199,16 @@
                         <h3>ファイル一覧 (<span id="fileCount">0</span>)</h3>
                         <div class="list-header-actions">
                             <label for="addFileInput" class="add-file-btn" title="ファイルを追加">＋ 追加</label>
-                            <input type="file" id="addFileInput" multiple accept="application/pdf,image/jpeg,image/png,image/bmp" hidden>
+                            <input type="file" id="addFileInput" multiple accept="application/pdf,image/*,.docx,.doc,.xlsx,.xls,.csv,.txt" hidden>
                             <button id="clearAllBtn" class="text-btn text-danger">すべてクリア</button>
                         </div>
                     </div>
+                    <p class="branch-help">💡 「枝番にする」を押すと、そのファイルがすぐ上の号証の枝番（例: 甲1号証<b>の2</b>）になります。もう一度押すと解除。</p>
                     <ul id="fileList" class="file-list">
                         <!-- File items will be injected here -->
                     </ul>
                     <div id="miniDropZone" class="mini-drop-zone">
-                        ここにファイルをドロップして追加
+                        クリックで追加（画面のどこにドロップしてもOK）
                     </div>
                 </div>
 
@@ -212,7 +231,15 @@
         </main>
     </div>
 
+    <!-- 画面全体ドロップ時のオーバーレイ -->
+    <div id="dropOverlay" class="drop-overlay" aria-hidden="true">
+        <div class="drop-overlay-inner">
+            <div class="drop-overlay-icon">📥</div>
+            <div class="drop-overlay-text">ここにドロップしてファイルを追加</div>
+        </div>
+    </div>
+
     <!-- Script loading -->
-    <script src="app.js"></script>
+    <script src="app.js?v=20260724"></script>
 </body>
 </html>
