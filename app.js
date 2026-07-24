@@ -365,18 +365,36 @@ function hideConvertingOverlay() {
 }
 
 /**
- * PDF先頭3ページのテキストを抽出する。
- * hasText: テキストレイヤー有無（mintsはOCR済みPDFが望ましいため、無い場合は一覧で警告）
- * text: 抽出テキスト（証拠説明書下書きの推測に使用）
+ * PDFの全ページからテキストレイヤーを抽出する（証拠説明書の日付・標目推測に使用）。
+ * hasText: テキストレイヤー有無（無い＝スキャン/手書き。証拠説明書出力時にOCRへ回す）
+ * text: 抽出テキスト（行構造をhasEOLで復元。日付・標目の判定精度のため）
+ * 巨大PDFだけは安全弁として先頭200＋末尾50ページに限定（脱落分はconsoleに明示）。
  */
-async function probePdfText(buffer) {
+async function probePdfText(buffer, label) {
     try {
         const pdf = await pdfjsLib.getDocument({ data: buffer.slice(0) }).promise;
-        const pagesToCheck = Math.min(3, pdf.numPages);
+        const total = pdf.numPages;
+        let pageNums;
+        const CAP = 300;
+        if (total <= CAP) {
+            pageNums = Array.from({ length: total }, (_, i) => i + 1);
+        } else {
+            const head = Array.from({ length: 200 }, (_, i) => i + 1);
+            const tail = Array.from({ length: 50 }, (_, i) => total - 50 + i + 1);
+            pageNums = head.concat(tail);
+            console.warn(`${label || 'PDF'}: ${total}ページと大きいため、テキスト抽出は先頭200＋末尾50ページに限定しました`);
+        }
         let text = '';
-        for (let p = 1; p <= pagesToCheck; p++) {
-            const tc = await (await pdf.getPage(p)).getTextContent();
-            text += tc.items.map(i => i.str).join('') + '\n';
+        for (let idx = 0; idx < pageNums.length; idx++) {
+            const tc = await (await pdf.getPage(pageNums[idx])).getTextContent();
+            for (const it of tc.items) {
+                text += it.str;
+                if (it.hasEOL) text += '\n';
+            }
+            text += '\n';
+            if (total > 8 && label) {
+                showConvertingOverlay(`テキスト読取中: ${label}（${idx + 1}/${pageNums.length}ページ）`);
+            }
         }
         return { hasText: text.trim().length > 0, text };
     } catch (e) {
@@ -407,9 +425,10 @@ async function handleFiles(fileList) {
     for (const file of validFiles) {
         showConvertingOverlay(`変換中: ${file.name}`);
         try {
+            const category = getFileCategory(file);
             const result = await fileToNamedPdfBuffer(file);
             if (!result) continue;
-            const probe = await probePdfText(result.buffer);
+            const probe = await probePdfText(result.buffer, result.name);
             state.files.push({
                 id: 'file_' + Math.random().toString(36).substr(2, 9),
                 file,
@@ -418,8 +437,10 @@ async function handleFiles(fileList) {
                 isBranch: false,
                 // OCR警告は元からPDFだったものだけ対象
                 // （画像・Word等からの変換は文字なしが前提のため警告しない）
-                hasTextLayer: getFileCategory(file) === 'pdf' ? probe.hasText : null,
-                extractedText: probe.text
+                hasTextLayer: category === 'pdf' ? probe.hasText : null,
+                extractedText: probe.text,
+                // 画像（写真・スキャン画像）は元画像を保持し、OCR時はpdf.js描画を介さず直接読み取る
+                sourceImageBlob: category === 'image' ? file : null
             });
         } catch (err) {
             console.error('Failed to process file:', file.name, err);
@@ -1232,18 +1253,52 @@ const DOC_TYPE_RULES = [
     { re: /図面|見取図/, author: '', purpose: '本件現場（対象物）の位置関係' },
 ];
 
-// テキスト・ファイル名から日付らしき文字列を1つ拾う（全角数字は半角化）
+// 標目（＝書類の名称）らしい語。ファイル名がこれを含めば利用者が意味ある名前を付けたとみなす。
+// 本文からの標目抽出でも同じ語を手がかりにする。
+const TITLE_KEYWORDS = /(全部事項証明書|一部事項証明書|登記事項証明書|履歴事項全部証明書|現在事項全部証明書|閉鎖事項証明書|登記簿謄本|登記情報|戸籍全部事項証明書|戸籍謄本|戸籍抄本|除籍謄本|改製原戸籍|住民票|印鑑登録証明書|印鑑証明書|固定資産評価証明書|公図|地積測量図|建物図面|預金取引明細|取引明細|入出金明細|通帳|残高証明書|課税証明書|非課税証明書|所得証明書|源泉徴収票|給与明細|確定申告書|決算書|貸借対照表|損益計算書|試算表|見積書|請求書|領収書|レシート|納品書|注文書|発注書|契約書|覚書|念書|合意書|示談書|和解書|誓約書|借用書|借用証書|金銭消費貸借契約書|賃貸借契約書|売買契約書|雇用契約書|労働契約書|就業規則|定款|議事録|株主総会議事録|取締役会議事録|陳述書|報告書|調査報告書|意見書|鑑定書|診断書|後遺障害診断書|診療報酬明細書|診療録|カルテ|施術証明書|通知書|催告書|内容証明|受任通知|回答書|申入書|理由書|上申書|申立書|答弁書|準備書面|訴状|判決書?|決定書?|和解調書|調停調書|公正証書|遺言書|自筆証書遺言|遺産分割協議書|委任状|委託契約書?|支払明細|利用明細|明細書|証明書|証書|申請書|届出書|承諾書|同意書|確認書|メール|ＬＩＮＥ|LINE|ライン|チャット|メッセージ|写真|画像|録音|反訳書|録取書|図面|見取図|地図|案内図|一覧表|計算書|内訳書|価格.?ガイド|査定書)/;
+
+// テキスト・ファイル名から作成年月日を推測する（全角数字は半角化）。
+// 優先: ①「作成/発行/交付」等ラベル直後の日付 → ②本文の最初の和暦 → ③本文の最初の西暦 → ④ファイル名の日付
 function guessDate(name, text) {
-    const normalize = (s) => s.replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
-    const hay = normalize(text || '');
-    const wareki = hay.match(/(令和|平成|昭和)\s*(元|\d{1,2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+    const normalize = (s) => (s || '').replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+    // OCRは文字間に空白を挿入しがち（"令 和 2 年…"）。日付は空白をまたがないので、
+    // 全空白を除去したテキストで照合する（「令和」等のリテラルが崩れないようにするため）。
+    const hay = normalize(text).replace(/[\s　]+/g, '');
+    const dateBody = '((?:令和|平成|昭和)\\s*(?:元|\\d{1,2})\\s*年\\s*\\d{1,2}\\s*月\\s*\\d{1,2}\\s*日|(?:19|20)\\d{2}\\s*年\\s*\\d{1,2}\\s*月\\s*\\d{1,2}\\s*日)';
+
+    // ① 「作成日／発行日／交付／調製／証明／届出／日付」等のラベルと同じ行にある日付を最優先
+    const labeled = hay.match(new RegExp('(?:作成年月日|作成日|作成|発行日|発行|交付|調製|証明日|証明|届出|日付)[：:\\s　]{0,8}' + dateBody));
+    if (labeled) return labeled[1].replace(/\s+/g, '');
+
+    // ② 本文中の最初の和暦日付
+    const wareki = hay.match(/(令和|平成|昭和)\s*(元|\d{1,2})\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日/);
     if (wareki) return wareki[0].replace(/\s+/g, '');
-    const seireki = hay.match(/(19|20)\d{2}\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+    // ③ 本文中の最初の西暦日付
+    const seireki = hay.match(/(19|20)\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日/);
     if (seireki) return seireki[0].replace(/\s+/g, '');
-    // ファイル名の日付（例: スクリーンショット 2026-07-24、20260724）
+    // ④ ファイル名の日付（例: スクリーンショット 2026-07-24、20260724）
     const n = normalize(name);
     const fn = n.match(/(19|20)(\d{2})[-_.\/年]?(\d{1,2})[-_.\/月]?(\d{1,2})/);
     if (fn) return `${fn[1]}${fn[2]}年${parseInt(fn[3], 10)}月${parseInt(fn[4], 10)}日`;
+    return '';
+}
+
+// 本文（先頭ページ）から標目＝書類名らしい行を1つ拾う。
+// タイトルは通常1ページ目の短い行にあるので、先頭の行から書類名キーワードを含む短い行を探す。
+function guessTitleFromContent(text) {
+    if (!text) return '';
+    const lines = text.split('\n')
+        .map(s => s.replace(/[　\t ]+/g, ' ').trim())
+        .filter(s => s.length > 0);
+    for (const ln of lines.slice(0, 25)) {
+        const compact = ln.replace(/\s/g, '');
+        if (compact.length < 2 || compact.length > 30) continue;
+        const m = compact.match(TITLE_KEYWORDS);
+        if (m) {
+            // 「◯◯であること」等の文の一部で拾わないよう、行がほぼ書類名だけのときのみ採用
+            if (compact.length <= m[0].length + 8) return compact;
+        }
+    }
     return '';
 }
 
@@ -1254,13 +1309,14 @@ function guessCompany(text) {
 }
 
 /**
- * 書類の内容（ファイル名＋抽出テキスト）から証拠説明書の各欄を推測する。
- * 確実に分からない欄は空欄のまま返す（あくまで下書き用の仮埋め）。
+ * 書類の内容（ファイル名＋抽出テキスト＝テキスト層又はOCR結果）から証拠説明書の各欄を推測する。
+ * 日付・標目は全文から、種別・作成者は先頭付近から判定する。確実に分からない欄は空欄のまま返す。
  */
 function guessDocMeta(fileObj) {
-    const name = fileObj.originalName.replace(/\.pdf$/i, '');
-    const text = (fileObj.extractedText || '').slice(0, 3000);
-    const hay = name + '\n' + text.slice(0, 500);
+    const name = fileObj.originalName.replace(/\.[^.]+$/, '');
+    const fullText = fileObj.extractedText || '';
+    const early = fullText.slice(0, 800);
+    const hay = name + '\n' + early;
 
     let author = '';
     let purpose = '';
@@ -1275,10 +1331,14 @@ function guessDocMeta(fileObj) {
 
     // 発行者系の書類は本文の法人名を作成者候補にする
     if (!author && matchedRule && /請求書|領収書|レシート|見積|診療報酬|源泉徴収/.test(matchedRule.re.source)) {
-        author = guessCompany(text);
+        author = guessCompany(fullText.slice(0, 3000));
     }
 
-    return { date: guessDate(name, text), author, purpose };
+    // 標目：意味あるファイル名（書類名キーワードを含む）を優先。無ければ本文から抽出、それも無ければファイル名。
+    const contentTitle = guessTitleFromContent(fullText);
+    const title = TITLE_KEYWORDS.test(name) ? name : (contentTitle || name);
+
+    return { date: guessDate(name, fullText), author, purpose, title };
 }
 
 // ── 証拠説明書のWord（.docx）出力 ──
@@ -1525,36 +1585,116 @@ function buildShoukoDocx(rows) {
     ]);
 }
 
+// ── OCR（スキャン・手書きPDF/画像のフォールバック）──
+// 完全ローカル（Tesseract.js）。書類データは一切外部送信せず、言語モデルだけCDNから取得する。
+// テキスト層の無い書類だけを、証拠説明書出力時にその場で読み取る。
+let _ocrWorker = null;
+async function getOcrWorker() {
+    if (typeof Tesseract === 'undefined') throw new Error('OCRエンジン(Tesseract.js)が読み込まれていません');
+    if (!_ocrWorker) {
+        // 日本語モデル（初回のみCDNから言語データを取得。書類そのものは送信しない）
+        _ocrWorker = await Tesseract.createWorker('jpn');
+    }
+    return _ocrWorker;
+}
+
+// 画像（写真・スキャン画像）を直接OCRする。pdf.jsの描画を介さないため高速・堅牢。
+async function ocrImageBlob(blob, label) {
+    const worker = await getOcrWorker();
+    showConvertingOverlay(`手書き・スキャン文字を読取中: ${label || ''}`);
+    const { data } = await worker.recognize(blob);
+    return data.text || '';
+}
+
+// PDFバッファの各ページを画像化してOCRし、抽出テキストを返す（進捗はオーバーレイ表示）。
+// OCRは低速なため、巨大書類だけ先頭30＋末尾10ページに限定し、脱落分はconsoleに明示する。
+async function ocrPdfBuffer(buffer, label) {
+    const pdf = await pdfjsLib.getDocument({ data: buffer.slice(0) }).promise;
+    const total = pdf.numPages;
+    let pageNums;
+    if (total <= 40) {
+        pageNums = Array.from({ length: total }, (_, i) => i + 1);
+    } else {
+        const head = Array.from({ length: 30 }, (_, i) => i + 1);
+        const tail = Array.from({ length: 10 }, (_, i) => total - 10 + i + 1);
+        pageNums = head.concat(tail);
+        console.warn(`${label || 'PDF'}: ${total}ページと大きいため、OCRは先頭30＋末尾10ページに限定しました`);
+    }
+    const worker = await getOcrWorker();
+    let text = '';
+    for (let idx = 0; idx < pageNums.length; idx++) {
+        const page = await pdf.getPage(pageNums[idx]);
+        const viewport = page.getViewport({ scale: 2.0 }); // OCR精度のため高解像度で描画
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+        showConvertingOverlay(`手書き・スキャン文字を読取中: ${label}（${idx + 1}/${pageNums.length}ページ）`);
+        const { data } = await worker.recognize(canvas);
+        text += (data.text || '') + '\n';
+    }
+    return text;
+}
+
 /**
  * 証拠説明書の下書きをWord（.docx）で出力する。
+ * テキスト層の無いスキャン・手書き書類は、その場でOCR（完全ローカル）して日付・標目を補う。
  * 号証番号・標目を自動記入し、作成年月日・作成者・立証趣旨は内容から推測できる範囲で仮埋めする。
  * 弁護士名・事件名・裁判所名等の前文は●●のままなので、Wordで開いて埋める。
  */
-function exportShoukoSetsumeiWord() {
+async function exportShoukoSetsumeiWord() {
     if (state.files.length === 0) return;
 
-    const rows = [];
-    for (let i = 0; i < state.files.length; i++) {
-        const title = state.files[i].originalName.replace(/\.[^.]+$/, '');
-        const guess = guessDocMeta(state.files[i]);
-        // 陳述書は原本提出が事務所ルール（原本が事務所にあるため）
-        const copy = /陳述書/.test(title) ? '原本' : '写し';
-        rows.push({
-            gousho: generateStampText(i),
-            title,
-            copy,
-            date: toShortWareki(guess.date),
-            author: guess.author,
-            purpose: guess.purpose,
-        });
-    }
+    try {
+        // テキスト層が無い（スキャン/手書き）書類は、その場でOCRして本文を補う
+        const needOcr = state.files.filter(f =>
+            !(f.extractedText && f.extractedText.trim().length > 0) && !f.ocrDone);
+        if (needOcr.length > 0) {
+            if (typeof Tesseract === 'undefined') {
+                alert('OCRエンジンの読み込みに失敗しました（オフライン等）。\nスキャン・手書き書類の日付／標目は空欄のまま出力します。');
+            } else {
+                showConvertingOverlay('手書き・スキャン文字の読み取りを準備中…');
+                for (const f of needOcr) {
+                    try {
+                        // 画像は元画像を直接OCR（高速・堅牢）。PDFスキャンはページを描画してOCR。
+                        f.extractedText = f.sourceImageBlob
+                            ? await ocrImageBlob(f.sourceImageBlob, f.originalName)
+                            : await ocrPdfBuffer(f.arrayBuffer, f.originalName);
+                    } catch (e) {
+                        console.warn('OCRに失敗:', f.originalName, e);
+                    }
+                    f.ocrDone = true; // 二重OCR防止（次回出力時は再読取しない）
+                }
+            }
+        }
 
-    const bytes = buildShoukoDocx(rows);
-    const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
-    const link = document.createElement('a');
-    link.href = window.URL.createObjectURL(blob);
-    link.download = `証拠説明書下書き_${getActualSymbol()}.docx`;
-    link.click();
+        const rows = [];
+        for (let i = 0; i < state.files.length; i++) {
+            const guess = guessDocMeta(state.files[i]);
+            // 陳述書は原本提出が事務所ルール（原本が事務所にあるため）
+            const copy = /陳述書/.test(guess.title) ? '原本' : '写し';
+            rows.push({
+                gousho: generateStampText(i),
+                title: guess.title,
+                copy,
+                date: toShortWareki(guess.date),
+                author: guess.author,
+                purpose: guess.purpose,
+            });
+        }
+
+        const bytes = buildShoukoDocx(rows);
+        const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+        const link = document.createElement('a');
+        link.href = window.URL.createObjectURL(blob);
+        link.download = `証拠説明書下書き_${getActualSymbol()}.docx`;
+        link.click();
+    } catch (err) {
+        console.error('証拠説明書の作成に失敗:', err);
+        alert(`証拠説明書の作成中にエラーが発生しました。\n詳細: ${err.message}`);
+    } finally {
+        hideConvertingOverlay();
+    }
 }
 
 // Initialize on Load
