@@ -61,7 +61,7 @@ const DOM = {
     // Actions
     downloadIndividualBtn: document.getElementById('downloadIndividualBtn'),
     downloadCombinedBtn: document.getElementById('downloadCombinedBtn'),
-    exportCsvBtn: document.getElementById('exportCsvBtn')
+    exportWordBtn: document.getElementById('exportWordBtn')
 };
 
 // --- Initialization & Event Listeners ---
@@ -208,7 +208,7 @@ function setupEventListeners() {
     // Process Actions
     DOM.downloadIndividualBtn.addEventListener('click', processAndDownloadIndividual);
     DOM.downloadCombinedBtn.addEventListener('click', processAndDownloadCombined);
-    DOM.exportCsvBtn.addEventListener('click', exportShoukoSetsumeiCsv);
+    DOM.exportWordBtn.addEventListener('click', exportShoukoSetsumeiWord);
 
     // Ctrl+V clipboard paste (screenshots etc.)
     document.addEventListener('paste', (e) => {
@@ -605,7 +605,7 @@ function updateDownloadButtonsState() {
     const hasFiles = state.files.length > 0;
     DOM.downloadIndividualBtn.disabled = !hasFiles;
     DOM.downloadCombinedBtn.disabled = !hasFiles;
-    DOM.exportCsvBtn.disabled = !hasFiles;
+    DOM.exportWordBtn.disabled = !hasFiles;
 }
 
 // --- Stamp Text Generation Logic ---
@@ -1281,27 +1281,279 @@ function guessDocMeta(fileObj) {
     return { date: guessDate(name, text), author, purpose };
 }
 
+// ── 証拠説明書のWord（.docx）出力 ──
+// 事務所ひな形（書類ひな形\00_共通\証拠説明書\証拠説明書.docx）と同じ書式で
+// 依存ライブラリなしにOOXMLを直接組み立てる。
+
+// 「令和７年３月１９日」「2026年7月24日」等を過去の証拠説明書の慣例表記「R7.3.19」へ変換する
+function toShortWareki(dateStr) {
+    if (!dateStr) return '';
+    const s = dateStr.replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+    let m = s.match(/(令和|平成|昭和)(元|\d{1,2})年(\d{1,2})月(\d{1,2})日/);
+    if (m) {
+        const era = { '令和': 'R', '平成': 'H', '昭和': 'S' }[m[1]];
+        const y = m[2] === '元' ? 1 : parseInt(m[2], 10);
+        return `${era}${y}.${parseInt(m[3], 10)}.${parseInt(m[4], 10)}`;
+    }
+    m = s.match(/((?:19|20)\d{2})年(\d{1,2})月(\d{1,2})日/);
+    if (m) {
+        const y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
+        if (y > 2019 || (y === 2019 && mo >= 5)) return `R${y - 2018}.${mo}.${d}`;
+        if (y > 1989 || (y === 1989 && mo >= 1)) return `H${y - 1988}.${mo}.${d}`;
+        if (y >= 1927) return `S${y - 1925}.${mo}.${d}`;
+        return `${y}.${mo}.${d}`;
+    }
+    return dateStr;
+}
+
+// 本日の日付を「令和８年７月２４日」形式（全角数字）で返す
+function todayWarekiFull() {
+    const now = new Date();
+    const y = now.getFullYear() - 2018; // 令和
+    const toZen = (n) => String(n).replace(/[0-9]/g, c => String.fromCharCode(c.charCodeAt(0) + 0xFEE0));
+    return `令和${toZen(y)}年${toZen(now.getMonth() + 1)}月${toZen(now.getDate())}日`;
+}
+
+function xmlEscape(s) {
+    return String(s == null ? '' : s)
+        .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+// ZIP（無圧縮stored）ライター。docxはZIPコンテナなのでこれで十分。
+let CRC_TABLE = null;
+function crc32(data) {
+    if (!CRC_TABLE) {
+        CRC_TABLE = new Uint32Array(256);
+        for (let i = 0; i < 256; i++) {
+            let c = i;
+            for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+            CRC_TABLE[i] = c >>> 0;
+        }
+    }
+    let crc = 0xFFFFFFFF;
+    for (let i = 0; i < data.length; i++) crc = CRC_TABLE[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function buildZipStored(entries) {
+    const enc = new TextEncoder();
+    const localParts = [];
+    const centralParts = [];
+    let offset = 0;
+    for (const { name, text } of entries) {
+        const nameBytes = enc.encode(name);
+        const data = enc.encode(text);
+        const crc = crc32(data);
+
+        const local = new Uint8Array(30 + nameBytes.length);
+        const lv = new DataView(local.buffer);
+        lv.setUint32(0, 0x04034b50, true);
+        lv.setUint16(4, 20, true);      // version needed
+        lv.setUint16(6, 0x0800, true);  // UTF-8 filename flag
+        lv.setUint16(8, 0, true);       // stored（無圧縮）
+        lv.setUint32(14, crc, true);
+        lv.setUint32(18, data.length, true);
+        lv.setUint32(22, data.length, true);
+        lv.setUint16(26, nameBytes.length, true);
+        local.set(nameBytes, 30);
+        localParts.push(local, data);
+
+        const central = new Uint8Array(46 + nameBytes.length);
+        const cv = new DataView(central.buffer);
+        cv.setUint32(0, 0x02014b50, true);
+        cv.setUint16(4, 20, true);
+        cv.setUint16(6, 20, true);
+        cv.setUint16(8, 0x0800, true);
+        cv.setUint32(16, crc, true);
+        cv.setUint32(20, data.length, true);
+        cv.setUint32(24, data.length, true);
+        cv.setUint16(28, nameBytes.length, true);
+        cv.setUint32(42, offset, true);
+        central.set(nameBytes, 46);
+        centralParts.push(central);
+        offset += local.length + data.length;
+    }
+    const centralSize = centralParts.reduce((a, p) => a + p.length, 0);
+    const end = new Uint8Array(22);
+    const ev = new DataView(end.buffer);
+    ev.setUint32(0, 0x06054b50, true);
+    ev.setUint16(8, entries.length, true);
+    ev.setUint16(10, entries.length, true);
+    ev.setUint32(12, centralSize, true);
+    ev.setUint32(16, offset, true);
+
+    const out = new Uint8Array(offset + centralSize + 22);
+    let pos = 0;
+    for (const p of [...localParts, ...centralParts, end]) { out.set(p, pos); pos += p.length; }
+    return out;
+}
+
+// 表セル内の段落（9pt・行送り486twip atLeast＝ひな形と同じ）
+function cellParaXml(text, center) {
+    const jc = center ? 'center' : 'left';
+    const runs = String(text || '').split('\n').map(line =>
+        line === '' ? '' : `<w:r><w:rPr><w:rFonts w:hint="eastAsia"/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr><w:t xml:space="preserve">${xmlEscape(line)}</w:t></w:r>`);
+    return runs.map(r =>
+        `<w:p><w:pPr><w:spacing w:line="486" w:lineRule="atLeast"/><w:jc w:val="${jc}"/><w:rPr><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr></w:pPr>${r}</w:p>`
+    ).join('');
+}
+
+function tcXml(widthPct, paraXml, gridSpan) {
+    const span = gridSpan ? `<w:gridSpan w:val="${gridSpan}"/>` : '';
+    return `<w:tc><w:tcPr><w:tcW w:w="${widthPct}" w:type="pct"/>${span}</w:tcPr>${paraXml}</w:tc>`;
+}
+
+// 前文の1段落（10.5pt既定）。jc: left/center/right、szは半ポイント指定
+function preParaXml(text, jc, sz) {
+    const szXml = sz ? `<w:sz w:val="${sz}"/><w:szCs w:val="${sz}"/>` : '';
+    const run = text === '' ? '' :
+        `<w:r><w:rPr><w:rFonts w:hint="eastAsia"/>${szXml}</w:rPr><w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r>`;
+    return `<w:p><w:pPr><w:jc w:val="${jc}"/></w:pPr>${run}</w:p>`;
+}
+
 /**
- * 証拠説明書の下書きをCSV（UTF-8 BOM付き・Excelでそのまま開ける）で出力する。
- * 号証番号・標目を自動記入し、作成年月日・作成者・立証趣旨は内容から推測できる範囲で仮埋めする。
+ * 証拠説明書のdocxバイナリを生成する（事務所ひな形と同じレイアウト）。
+ * rows: [{ gousho, title, copy, date, author, purpose }]
  */
-function exportShoukoSetsumeiCsv() {
+function buildShoukoDocx(rows) {
+    const NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+
+    // ── 前文（弁護士名・事件名・裁判所名は●●のまま。日付は本日） ──
+    const preamble =
+        preParaXml('令和●年（●）第●●号　●●請求事件', 'left') +
+        preParaXml('原　告　　●●', 'left') +
+        preParaXml('被　告　　●●', 'left') +
+        `<w:p><w:pPr><w:spacing w:line="566" w:lineRule="exact"/><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:rFonts w:hint="eastAsia"/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr><w:t>証拠説明書</w:t></w:r></w:p>` +
+        preParaXml(todayWarekiFull(), 'right') +
+        preParaXml('●●裁判所　御中', 'left') +
+        preParaXml('', 'left') +
+        preParaXml('●●訴訟代理人弁護士　●●', 'right') +
+        preParaXml('', 'left');
+
+    // ── 表（6列グリッド。見出し行の「標目」は2列結合＝ひな形と同一構造） ──
+    const headerCellPara = (text) =>
+        `<w:p><w:pPr><w:spacing w:line="486" w:lineRule="atLeast"/><w:jc w:val="center"/><w:rPr><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr></w:pPr><w:r><w:rPr><w:rFonts w:hint="eastAsia"/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr><w:t>${xmlEscape(text)}</w:t></w:r></w:p>`;
+    const hyomokuHeaderPara = ['標　　目', '（原本・写しの別）'].map(t =>
+        `<w:p><w:pPr><w:spacing w:line="280" w:lineRule="exact"/><w:jc w:val="center"/><w:rPr><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr></w:pPr><w:r><w:rPr><w:rFonts w:hint="eastAsia"/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr><w:t>${t}</w:t></w:r></w:p>`).join('');
+
+    const headerRow =
+        `<w:tr><w:trPr><w:trHeight w:val="486"/></w:trPr>` +
+        tcXml(466, headerCellPara('号証')) +
+        tcXml(1331, hyomokuHeaderPara, 2) +
+        tcXml(626, headerCellPara('作成年月日')) +
+        tcXml(781, headerCellPara('作　成　者')) +
+        tcXml(1796, headerCellPara('立　証　趣　旨')) +
+        `</w:tr>`;
+
+    const dataRows = rows.map(row =>
+        `<w:tr><w:trPr><w:trHeight w:val="984"/></w:trPr>` +
+        tcXml(466, cellParaXml(row.gousho)) +
+        tcXml(1018, cellParaXml(row.title)) +
+        tcXml(313, cellParaXml(row.copy)) +
+        tcXml(626, cellParaXml(row.date)) +
+        tcXml(781, cellParaXml(row.author)) +
+        tcXml(1796, cellParaXml(row.purpose)) +
+        `</w:tr>`
+    ).join('');
+
+    const table =
+        `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>` +
+        `<w:tblBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tblBorders>` +
+        `<w:tblCellMar><w:left w:w="52" w:type="dxa"/><w:right w:w="52" w:type="dxa"/></w:tblCellMar></w:tblPr>` +
+        `<w:tblGrid><w:gridCol w:w="845"/><w:gridCol w:w="1845"/><w:gridCol w:w="567"/><w:gridCol w:w="1134"/><w:gridCol w:w="1415"/><w:gridCol w:w="3255"/></w:tblGrid>` +
+        headerRow + dataRows + `</w:tbl>`;
+
+    const sectPr =
+        `<w:sectPr><w:footerReference w:type="default" r:id="rId2"/>` +
+        `<w:pgSz w:w="11906" w:h="16838" w:code="9"/>` +
+        `<w:pgMar w:top="1985" w:right="1134" w:bottom="1701" w:left="1701" w:header="850" w:footer="850" w:gutter="0"/>` +
+        `<w:pgNumType w:start="1"/><w:cols w:space="720"/>` +
+        `<w:docGrid w:type="linesAndChars" w:linePitch="486" w:charSpace="2048"/></w:sectPr>`;
+
+    const documentXml =
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+        `<w:document ${NS}><w:body>${preamble}${table}<w:p/>${sectPr}</w:body></w:document>`;
+
+    const stylesXml =
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+        `<w:styles ${NS}><w:docDefaults><w:rPrDefault><w:rPr>` +
+        `<w:rFonts w:ascii="Times New Roman" w:eastAsia="ＭＳ 明朝" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>` +
+        `<w:kern w:val="2"/><w:sz w:val="21"/><w:szCs w:val="21"/><w:lang w:val="en-US" w:eastAsia="ja-JP" w:bidi="ar-SA"/>` +
+        `</w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults>` +
+        `<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style></w:styles>`;
+
+    const footerXml =
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+        `<w:ftr ${NS}><w:p><w:pPr><w:jc w:val="center"/></w:pPr>` +
+        `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+        `<w:r><w:instrText xml:space="preserve">PAGE   \\* MERGEFORMAT</w:instrText></w:r>` +
+        `<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r>` +
+        `<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:ftr>`;
+
+    const contentTypes =
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+        `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
+        `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
+        `<Default Extension="xml" ContentType="application/xml"/>` +
+        `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>` +
+        `<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>` +
+        `<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>` +
+        `</Types>`;
+
+    const rootRels =
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>` +
+        `</Relationships>`;
+
+    const docRels =
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>` +
+        `<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>` +
+        `</Relationships>`;
+
+    return buildZipStored([
+        { name: '[Content_Types].xml', text: contentTypes },
+        { name: '_rels/.rels', text: rootRels },
+        { name: 'word/document.xml', text: documentXml },
+        { name: 'word/_rels/document.xml.rels', text: docRels },
+        { name: 'word/styles.xml', text: stylesXml },
+        { name: 'word/footer1.xml', text: footerXml },
+    ]);
+}
+
+/**
+ * 証拠説明書の下書きをWord（.docx）で出力する。
+ * 号証番号・標目を自動記入し、作成年月日・作成者・立証趣旨は内容から推測できる範囲で仮埋めする。
+ * 弁護士名・事件名・裁判所名等の前文は●●のままなので、Wordで開いて埋める。
+ */
+function exportShoukoSetsumeiWord() {
     if (state.files.length === 0) return;
 
-    const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
-    const rows = [['号証', '標目', '原本・写しの別', '作成年月日', '作成者', '立証趣旨']];
-
+    const rows = [];
     for (let i = 0; i < state.files.length; i++) {
-        const title = state.files[i].originalName.replace(/\.pdf$/i, '');
+        const title = state.files[i].originalName.replace(/\.[^.]+$/, '');
         const guess = guessDocMeta(state.files[i]);
-        rows.push([generateStampText(i), title, '写し', guess.date, guess.author, guess.purpose]);
+        // 陳述書は原本提出が事務所ルール（原本が事務所にあるため）
+        const copy = /陳述書/.test(title) ? '原本' : '写し';
+        rows.push({
+            gousho: generateStampText(i),
+            title,
+            copy,
+            date: toShortWareki(guess.date),
+            author: guess.author,
+            purpose: guess.purpose,
+        });
     }
 
-    const csv = '﻿' + rows.map(r => r.map(esc).join(',')).join('\r\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const bytes = buildShoukoDocx(rows);
+    const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
     const link = document.createElement('a');
     link.href = window.URL.createObjectURL(blob);
-    link.download = `証拠説明書下書き_${getActualSymbol()}.csv`;
+    link.download = `証拠説明書下書き_${getActualSymbol()}.docx`;
     link.click();
 }
 

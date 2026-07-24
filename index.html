@@ -20,14 +20,14 @@
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     
-    <link rel="stylesheet" href="styles.css?v=20260724">
+    <link rel="stylesheet" href="styles.css?v=20260724b">
 </head>
 <body>
     <div class="app-container">
         <!-- Sidebar Options -->
         <aside class="sidebar glass-panel">
             <h1 class="app-title"><span class="icon">📄</span>号証つけるくん</h1>
-            <p class="app-subtitle">証拠番号 自動付与ツール <span style="display:inline-block;font-size:0.72em;color:#16a34a;border:1px solid #16a34a;border-radius:4px;padding:0 5px;vertical-align:middle;">v2026.07.24 A4・mints対応</span></p>
+            <p class="app-subtitle">証拠番号 自動付与ツール <span style="display:inline-block;font-size:0.72em;color:#16a34a;border:1px solid #16a34a;border-radius:4px;padding:0 5px;vertical-align:middle;">v2026.07.24b 証拠説明書Word出力</span></p>
             
             <div class="settings-group">
                 <h3>1. 符号・番号設定</h3>
@@ -169,8 +169,8 @@
                     <button id="downloadCombinedBtn" class="secondary-btn" disabled title="mints提出用：枝番を親番号ごとに1つのPDFへ結合します">
                         枝番を結合してダウンロード（mints用）
                     </button>
-                    <button id="exportCsvBtn" class="secondary-btn" disabled title="号証一覧から証拠説明書の下書き（Excelで開けるCSV）を出力します">
-                        証拠説明書の下書き（CSV）
+                    <button id="exportWordBtn" class="secondary-btn" disabled title="号証一覧から証拠説明書の下書き（事務所ひな形と同じ書式のWord）を出力します">
+                        証拠説明書の下書き（Word）
                     </button>
                 </div>
             </div>
@@ -240,6 +240,6 @@
     </div>
 
     <!-- Script loading -->
-    <script src="app.js?v=20260724"></script>
+    <script src="app.js?v=20260724b"></script>
 </body>
 </html>
