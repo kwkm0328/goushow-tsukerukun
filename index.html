@@ -22,14 +22,14 @@
     <!-- OCR（スキャン・手書き書類の文字読み取り。完全ローカル処理・書類データは外部送信しない） -->
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
-    <link rel="stylesheet" href="styles.css?v=20260725g">
+    <link rel="stylesheet" href="styles.css?v=20260725h">
 </head>
 <body>
     <div class="app-container">
         <!-- Sidebar Options -->
         <aside class="sidebar glass-panel">
             <h1 class="app-title"><span class="icon">📄</span>号証つけるくん</h1>
-            <p class="app-subtitle">証拠番号 自動付与ツール <span style="display:inline-block;font-size:0.72em;color:#16a34a;border:1px solid #16a34a;border-radius:4px;padding:0 5px;vertical-align:middle;">v2026.07.25g 号証全半角・原本写し自動判定</span></p>
+            <p class="app-subtitle">証拠番号 自動付与ツール <span style="display:inline-block;font-size:0.72em;color:#16a34a;border:1px solid #16a34a;border-radius:4px;padding:0 5px;vertical-align:middle;">v2026.07.25h 実務パターン全対応（日付括弧・同上・枝番まとめ等）</span></p>
             
             <div class="settings-group">
                 <h3>1. 符号・番号設定</h3>
@@ -174,6 +174,16 @@
                     <button id="exportWordBtn" class="secondary-btn" disabled title="号証一覧から証拠説明書の下書き（事務所ひな形と同じ書式のWord）を出力します">
                         証拠説明書の下書き（Word）
                     </button>
+                    <label class="modern-checkbox" style="font-size:0.82em;margin-top:6px;" title="簡裁・旧書式。表の末尾に「備考」列を追加します">
+                        <input type="checkbox" id="shoukoRemarks">
+                        <span class="checkmark"></span>
+                        証拠説明書に備考欄を付ける（簡裁旧書式）
+                    </label>
+                    <label class="modern-checkbox" style="font-size:0.82em;" title="同じ書類名の枝番を「甲１の１ないし６」のように1行へまとめます">
+                        <input type="checkbox" id="mergeBranches">
+                        <span class="checkmark"></span>
+                        同種の枝番を1行にまとめる
+                    </label>
                 </div>
             </div>
         </aside>
@@ -242,6 +252,6 @@
     </div>
 
     <!-- Script loading -->
-    <script src="app.js?v=20260725g"></script>
+    <script src="app.js?v=20260725h"></script>
 </body>
 </html>

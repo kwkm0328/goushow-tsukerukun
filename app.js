@@ -22,7 +22,9 @@ const state = {
         customY: 0,
         whiteBackground: true,
         drawBorder: true,
-        a4Normalize: true
+        a4Normalize: true,
+        shoukoRemarks: false, // 証拠説明書に備考欄（簡裁旧書式）
+        mergeBranches: false  // 同種の枝番を1行にまとめる
     }
 };
 
@@ -61,7 +63,9 @@ const DOM = {
     // Actions
     downloadIndividualBtn: document.getElementById('downloadIndividualBtn'),
     downloadCombinedBtn: document.getElementById('downloadCombinedBtn'),
-    exportWordBtn: document.getElementById('exportWordBtn')
+    exportWordBtn: document.getElementById('exportWordBtn'),
+    shoukoRemarks: document.getElementById('shoukoRemarks'),
+    mergeBranches: document.getElementById('mergeBranches')
 };
 
 // --- Initialization & Event Listeners ---
@@ -198,6 +202,13 @@ function setupEventListeners() {
 
     DOM.a4Normalize.addEventListener('change', (e) => {
         state.settings.a4Normalize = e.target.checked;
+    });
+
+    if (DOM.shoukoRemarks) DOM.shoukoRemarks.addEventListener('change', (e) => {
+        state.settings.shoukoRemarks = e.target.checked;
+    });
+    if (DOM.mergeBranches) DOM.mergeBranches.addEventListener('change', (e) => {
+        state.settings.mergeBranches = e.target.checked;
     });
 
     setupStampDrag();
@@ -704,17 +715,31 @@ function generateStampText(index) {
     return base;
 }
 
+// 号証番号の数字整形：主番号が1桁なら全角（甲１）、2桁以上は半角（甲16）で統一する（事務所慣例）。
+function goushoNumFmt(mainNum) {
+    const zen = (n) => String(n).replace(/[0-9]/g, c => String.fromCharCode(c.charCodeAt(0) + 0xFEE0));
+    return mainNum < 10 ? zen : (n) => String(n);
+}
+
 // 証拠説明書の号証欄用ラベル（例: 甲１、枝番は 甲１の２）。PDFスタンプと違い「号証」等の接尾辞は付けない。
-// 事務所慣例に合わせ、主番号が1桁なら全角（甲１）、2桁以上は半角（甲16）で統一する。
 function generateGoushoLabel(index) {
     const numbering = computeNumbering();
     if (index < 0 || index >= numbering.length) return '';
     const { mainNum, branchNum, hasBranches } = numbering[index];
-    const zen = (n) => String(n).replace(/[0-9]/g, c => String.fromCharCode(c.charCodeAt(0) + 0xFEE0)); // 全角数字
-    const fmt = mainNum < 10 ? zen : (n) => String(n); // ラベル内は主番号の桁数で全角/半角を統一
+    const fmt = goushoNumFmt(mainNum);
     let base = `${getActualSymbol()}${fmt(mainNum)}`;   // 甲１ / 甲16
     if (hasBranches) base += `の${fmt(branchNum)}`;      // 甲１の２
     return base;
+}
+
+// 枝番をまとめた号証ラベル（例: 甲２の１ないし６ / 甲１の１、甲１の２）。sepは「ないし」等。
+function generateGoushoRangeLabel(mainNum, branchNums, sep) {
+    const fmt = goushoNumFmt(mainNum);
+    const sym = getActualSymbol();
+    if (branchNums.length <= 1) return `${sym}${fmt(mainNum)}${branchNums.length ? 'の' + fmt(branchNums[0]) : ''}`;
+    const first = branchNums[0], last = branchNums[branchNums.length - 1];
+    if (branchNums.length === 2) return `${sym}${fmt(mainNum)}の${fmt(first)}、${sym}${fmt(mainNum)}の${fmt(last)}`;
+    return `${sym}${fmt(mainNum)}の${fmt(first)}${sep || 'ないし'}${fmt(last)}`;
 }
 
 // mints等のファイル名規則対応: 禁止記号を除去し、拡張子込み50文字以内に収める
@@ -1243,9 +1268,12 @@ async function processAndDownloadCombined() {
 // ── 証拠説明書下書きの推測ロジック ──
 
 // 書類種別ごとの既定値（ファイル名・本文に含まれる語で判定。上から順に優先）
-//   label : 標目に使う清書名（無ければファイル名/本文から抽出）
-//   issuer: true なら作成者＝発行法人（ファイル名・本文の会社名で補完）
-//   dated : true なら標目を「○年○月○日付＋書類名」にする（回答書・通知書等の往復書面）
+//   label            : 標目に使う清書名（無ければファイル名/本文から抽出）
+//   issuer           : true なら作成者＝発行法人（ファイル名・本文の会社名で補完）
+//   dated            : true なら標目を「○年○月○日付＋書類名」にする（回答書・通知書等の往復書面）
+//   original         : true なら原本、既定は写し
+//   authorNeedsDetail: true なら作成者が定型（機関名のみ等）で具体名の補記が要るため【要確認】
+//   yearPrefix       : true なら標目に「令和○年度／○年分／第○期」等の年度冠を付す（税務・決算）
 const DOC_TYPE_RULES = [
     { re: /賃貸借契約/, author: '当事者双方', purpose: '賃貸借契約締結の事実及びその内容', original: true },
     { re: /雇用契約|労働契約/, author: '当事者双方', purpose: '雇用契約締結の事実及びその内容', original: true },
@@ -1261,12 +1289,16 @@ const DOC_TYPE_RULES = [
     { re: /請求書/, author: '', purpose: '請求の事実及びその金額', issuer: true },
     { re: /領収書|レシート/, author: '', purpose: '支払の事実及びその金額', issuer: true },
     { re: /見積/, author: '', purpose: '見積の内容', issuer: true },
-    { re: /交通事故証明|事故証明書/, label: '交通事故証明書', author: '自動車安全運転センター', purpose: '本件事故の発生日時、場所及び当事者' },
-    { re: /登記事項証明書|全部事項証明書|登記簿|登記情報/, author: '法務局登記官', purpose: '本件不動産（法人）の登記上の権利関係' },
-    { re: /戸籍|除籍|住民票/, author: '市区町村長', purpose: '当事者の身分関係（住所）' },
-    { re: /診断書/, author: '医師', purpose: '傷病名、治療経過及び症状の内容' },
-    { re: /診療報酬明細|レセプト/, author: '医療機関', purpose: '治療内容及び治療費の額' },
-    { re: /源泉徴収票|給与明細|課税証明/, author: '', purpose: '収入の額' },
+    { re: /交通事故証明|事故証明書/, label: '交通事故証明書', author: '自動車安全運転センター', purpose: '本件事故の発生日時、場所及び当事者', authorNeedsDetail: true },
+    { re: /登記事項証明書|全部事項証明書|登記簿|登記情報/, author: '法務局登記官', purpose: '本件不動産の所有関係その他の登記上の権利関係', authorNeedsDetail: true },
+    { re: /評価証明|課税明細|固定資産/, author: '市区町村長', purpose: '本件不動産の評価額', authorNeedsDetail: true, yearPrefix: true },
+    { re: /戸籍|除籍/, author: '市区町村長', purpose: '当事者の身分関係及び相続関係（死亡の事実、相続人の範囲及び法定相続分）', authorNeedsDetail: true },
+    { re: /住民票/, author: '市区町村長', purpose: '当事者の住所', authorNeedsDetail: true },
+    { re: /診断書/, author: '医師', purpose: '傷病名、治療経過及び症状の内容', authorNeedsDetail: true },
+    { re: /診療報酬明細|レセプト/, author: '医療機関', purpose: '治療内容及び治療費の額', authorNeedsDetail: true },
+    { re: /確定申告|決算書|決算報告|貸借対照表|損益計算書/, author: '', purpose: '収入（所得）の状況', yearPrefix: true },
+    { re: /控除証明|保険料控除/, author: '', purpose: '保険契約の内容', issuer: true, yearPrefix: true },
+    { re: /源泉徴収票|給与明細|課税証明/, author: '', purpose: '収入の額', yearPrefix: true },
     { re: /陳述書/, author: '', purpose: '本件の経緯', original: true },
     { re: /議事録/, author: '', purpose: '会議における協議・決議の内容' },
     { re: /就業規則/, author: '', purpose: '就業規則の定めの内容' },
@@ -1280,25 +1312,32 @@ const DOC_TYPE_RULES = [
 const TITLE_KEYWORDS = /(全部事項証明書|一部事項証明書|登記事項証明書|履歴事項全部証明書|現在事項全部証明書|閉鎖事項証明書|登記簿謄本|登記情報|戸籍全部事項証明書|戸籍謄本|戸籍抄本|除籍謄本|改製原戸籍|住民票|印鑑登録証明書|印鑑証明書|固定資産評価証明書|公図|地積測量図|建物図面|預金取引明細|取引明細|入出金明細|通帳|残高証明書|課税証明書|非課税証明書|所得証明書|源泉徴収票|給与明細|確定申告書|決算書|貸借対照表|損益計算書|試算表|見積書|請求書|領収書|レシート|納品書|注文書|発注書|契約書|覚書|念書|合意書|示談書|和解書|誓約書|借用書|借用証書|金銭消費貸借契約書|賃貸借契約書|売買契約書|雇用契約書|労働契約書|就業規則|定款|議事録|株主総会議事録|取締役会議事録|陳述書|報告書|調査報告書|意見書|鑑定書|診断書|後遺障害診断書|診療報酬明細書|診療録|カルテ|施術証明書|通知書|催告書|内容証明|受任通知|回答書|申入書|理由書|上申書|申立書|答弁書|準備書面|訴状|判決書?|決定書?|和解調書|調停調書|公正証書|遺言書|自筆証書遺言|遺産分割協議書|委任状|委託契約書?|支払明細|利用明細|明細書|証明書|証書|申請書|届出書|承諾書|同意書|確認書|メール|ＬＩＮＥ|LINE|ライン|チャット|メッセージ|写真|画像|録音|反訳書|録取書|図面|見取図|地図|案内図|一覧表|計算書|内訳書|価格.?ガイド|査定書)/;
 
 // テキスト・ファイル名から作成年月日を推測する（全角数字は半角化）。
-// 優先: ①「作成/発行/交付」等ラベル直後の日付 → ②本文の最初の和暦 → ③本文の最初の西暦 → ④ファイル名の日付
+// 実務の多様な表記に対応：完全日付／範囲（〜）／「頃」／年月のみ／年のみ＋頃。
+// 優先: ①範囲 → ②ラベル直後 → ③完全日付 → ④年月のみ → ⑤年のみ＋頃 → ⑥ファイル名の日付
 function guessDate(name, text) {
     const normalize = (s) => (s || '').replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
-    // OCRは文字間に空白を挿入しがち（"令 和 2 年…"）。日付は空白をまたがないので、
-    // 全空白を除去したテキストで照合する（「令和」等のリテラルが崩れないようにするため）。
+    // OCRは文字間に空白を挿入しがち（"令 和 2 年…"）。日付は空白をまたがないので全空白を除去して照合。
     const hay = normalize(text).replace(/[\s　]+/g, '');
-    const dateBody = '((?:令和|平成|昭和)\\s*(?:元|\\d{1,2})\\s*年\\s*\\d{1,2}\\s*月\\s*\\d{1,2}\\s*日|(?:19|20)\\d{2}\\s*年\\s*\\d{1,2}\\s*月\\s*\\d{1,2}\\s*日)';
+    const D = '(?:令和|平成|昭和)(?:元|\\d{1,2})年\\d{1,2}月\\d{1,2}日|(?:19|20)\\d{2}年\\d{1,2}月\\d{1,2}日';
+    const YM = '(?:令和|平成|昭和)(?:元|\\d{1,2})年\\d{1,2}月|(?:19|20)\\d{2}年\\d{1,2}月';
+    const Y = '(?:令和|平成|昭和)(?:元|\\d{1,2})年|(?:19|20)\\d{2}年';
 
-    // ① 「作成日／発行日／交付／調製／証明／届出／日付」等のラベルと同じ行にある日付を最優先
-    const labeled = hay.match(new RegExp('(?:作成年月日|作成日|作成|発行日|発行|交付|調製|証明日|証明|届出|日付)[：:\\s　]{0,8}' + dateBody));
-    if (labeled) return labeled[1].replace(/\s+/g, '');
-
-    // ② 本文中の最初の和暦日付
-    const wareki = hay.match(/(令和|平成|昭和)\s*(元|\d{1,2})\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日/);
-    if (wareki) return wareki[0].replace(/\s+/g, '');
-    // ③ 本文中の最初の西暦日付
-    const seireki = hay.match(/(19|20)\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日/);
-    if (seireki) return seireki[0].replace(/\s+/g, '');
-    // ④ ファイル名の日付（例: スクリーンショット 2026-07-24、20260724）
+    // ① 範囲（戸籍一式・メール往復・診療録など）: 日付〜日付
+    let m = hay.match(new RegExp('(' + D + ')[〜～~ないし乃至]{1,2}(' + D + ')'));
+    if (m) return m[1] + '〜' + m[2];
+    // ② ラベル（作成日/発行日/交付等）直後の完全日付（頃許容）
+    m = hay.match(new RegExp('(?:作成年月日|作成日|作成|発行日|発行|交付|調製|証明日|証明|届出|日付)[：:]{0,3}(' + D + ')(頃)?'));
+    if (m) return m[1] + (m[2] || '');
+    // ③ 本文中の最初の完全日付（頃許容）
+    m = hay.match(new RegExp('(' + D + ')(頃)?'));
+    if (m) return m[1] + (m[2] || '');
+    // ④ 年月のみ（頃許容）
+    m = hay.match(new RegExp('(' + YM + ')(頃)?'));
+    if (m) return m[1] + (m[2] || '');
+    // ⑤ 年のみ＋頃
+    m = hay.match(new RegExp('(' + Y + ')頃'));
+    if (m) return m[1] + '頃';
+    // ⑥ ファイル名の日付（例: スクリーンショット 2026-07-24、20260724）
     const n = normalize(name);
     const fn = n.match(/(19|20)(\d{2})[-_.\/年]?(\d{1,2})[-_.\/月]?(\d{1,2})/);
     if (fn) return `${fn[1]}${fn[2]}年${parseInt(fn[3], 10)}月${parseInt(fn[4], 10)}日`;
@@ -1398,8 +1437,9 @@ function cleanFilenameTitle(name) {
     const segs = name.split(/[\s　_]+/).filter(Boolean);
     let seg = segs.find(s => TITLE_KEYWORDS.test(s));
     if (!seg) seg = name;
-    seg = seg.replace(/\d{4,}$/, '').trim();        // 末尾の日付らしい数字列（080724等）を除去
     seg = seg.replace(/^[（(【\[].*?[）)】\]]/, '').trim(); // 先頭の括弧書き（号証番号等）を除去
+    // 末尾の連番・区切り（A／B／1／2／(1)／-2／080724 等。「（土地）」等の語は末尾がCJKなので残る）
+    seg = seg.replace(/[（(]?\s*[-_.0-9A-Za-zＡ-Ｚａ-ｚ]+\s*[）)]?\s*$/, '').trim();
     return seg || name;
 }
 
@@ -1466,41 +1506,76 @@ function guessDocMeta(fileObj) {
         else { coreName = name; titleSource = 'fallback'; }
     }
 
-    // 往復書面（回答書・通知書等）は「○年○月○日付＋書類名」を標目にする
-    let title = coreName;
-    if (matchedRule && matchedRule.dated && date) {
-        title = toWarekiFull(date) + '付' + coreName;
+    // 税務・決算・証明書類は「令和○年度／○年分／第○期」等の年度冠を標目頭に付す
+    if (matchedRule && matchedRule.yearPrefix) {
+        const yp = guessYearPrefix(name, fullText);
+        if (yp && !coreName.startsWith(yp)) coreName = yp + coreName;
     }
+
+    // 往復書面（回答書・通知書等）は「○年○月○日付＋書類名」を標目にする
+    const datedTitle = !!(matchedRule && matchedRule.dated && date);
+    let title = datedTitle ? (toWarekiFull(date) + '付' + coreName) : coreName;
 
     // 原本／写しの別：契約書・借用書・合意書・陳述書等（事務所ルールで原本提出）は原本、他は写し
     const original = !!(matchedRule && matchedRule.original);
+    // 作成者が機関名のみ等の定型で具体名（首長名・支局名等）の補記が要るか
+    const authorNeedsDetail = !!(matchedRule && matchedRule.authorNeedsDetail && author);
 
-    return { date, author, authorConfident, purpose, title, titleSource, original };
+    return { date, author, authorConfident, authorNeedsDetail, purpose, title, titleSource, original, core: coreName, datedTitle };
+}
+
+// 税務・決算・証明書類の標目に冠する年度表記を拾う（令和○年度／○年分／第○期／令和○年分）
+function guessYearPrefix(name, fullText) {
+    const s = (name + '\n' + fullText.slice(0, 1500)).replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).replace(/[\s　]+/g, '');
+    let m = s.match(/(?:令和|平成|昭和)(?:元|\d{1,2})年度/); if (m) return m[0];
+    m = s.match(/(?:19|20)\d{2}年度/); if (m) return m[0];
+    m = s.match(/(?:令和|平成|昭和)(?:元|\d{1,2})年分/); if (m) return m[0];
+    m = s.match(/(?:19|20)\d{2}年分/); if (m) return m[0];
+    m = s.match(/第\d{1,3}期/); if (m) return m[0];
+    return '';
 }
 
 // ── 証拠説明書のWord（.docx）出力 ──
 // 事務所ひな形（書類ひな形\00_共通\証拠説明書\証拠説明書.docx）と同じ書式で
 // 依存ライブラリなしにOOXMLを直接組み立てる。
 
-// 「令和７年３月１９日」「2026年7月24日」等を過去の証拠説明書の慣例表記「R7.3.19」へ変換する
+// 単一の日付又は年月・年を「R7.3.19」「R4.11」「H27」の短縮和暦へ変換する（不能なら''）
+function toShortWarekiOne(s) {
+    s = (s || '').replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+    const E = { '令和': 'R', '平成': 'H', '昭和': 'S' };
+    let m = s.match(/(令和|平成|昭和)(元|\d{1,2})年(\d{1,2})月(\d{1,2})日/);
+    if (m) return `${E[m[1]]}${m[2] === '元' ? 1 : +m[2]}.${+m[3]}.${+m[4]}`;
+    m = s.match(/(令和|平成|昭和)(元|\d{1,2})年(\d{1,2})月/);
+    if (m) return `${E[m[1]]}${m[2] === '元' ? 1 : +m[2]}.${+m[3]}`;
+    m = s.match(/(令和|平成|昭和)(元|\d{1,2})年/);
+    if (m) return `${E[m[1]]}${m[2] === '元' ? 1 : +m[2]}`;
+    const sei = (y, mo, d) => {
+        let e, ey;
+        if (y > 2019 || (y === 2019 && (mo || 1) >= 5)) { e = 'R'; ey = y - 2018; }
+        else if (y > 1989 || (y === 1989 && (mo || 12) >= 1)) { e = 'H'; ey = y - 1988; }
+        else { e = 'S'; ey = y - 1925; }
+        return e + ey + (mo ? '.' + mo : '') + (d ? '.' + d : '');
+    };
+    m = s.match(/((?:19|20)\d{2})年(\d{1,2})月(\d{1,2})日/); if (m) return sei(+m[1], +m[2], +m[3]);
+    m = s.match(/((?:19|20)\d{2})年(\d{1,2})月/); if (m) return sei(+m[1], +m[2], 0);
+    m = s.match(/((?:19|20)\d{2})年/); if (m) return sei(+m[1], 0, 0);
+    return '';
+}
+
+// 「令和７年３月１９日」「2026年7月24日」等を慣例表記「R7.3.19」へ変換する。
+// 範囲（〜）、「頃」、年月のみ、年のみ＋頃にも対応する。
 function toShortWareki(dateStr) {
     if (!dateStr) return '';
-    const s = dateStr.replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
-    let m = s.match(/(令和|平成|昭和)(元|\d{1,2})年(\d{1,2})月(\d{1,2})日/);
-    if (m) {
-        const era = { '令和': 'R', '平成': 'H', '昭和': 'S' }[m[1]];
-        const y = m[2] === '元' ? 1 : parseInt(m[2], 10);
-        return `${era}${y}.${parseInt(m[3], 10)}.${parseInt(m[4], 10)}`;
+    const koro = /頃$/.test(dateStr);
+    const core = dateStr.replace(/頃$/, '').trim();
+    const parts = core.split(/[〜～~]/);
+    if (parts.length === 2) {
+        const a = toShortWarekiOne(parts[0].trim()) || parts[0].trim();
+        const b = toShortWarekiOne(parts[1].trim()) || parts[1].trim();
+        return `${a}〜${b}${koro ? '頃' : ''}`;
     }
-    m = s.match(/((?:19|20)\d{2})年(\d{1,2})月(\d{1,2})日/);
-    if (m) {
-        const y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
-        if (y > 2019 || (y === 2019 && mo >= 5)) return `R${y - 2018}.${mo}.${d}`;
-        if (y > 1989 || (y === 1989 && mo >= 1)) return `H${y - 1988}.${mo}.${d}`;
-        if (y >= 1927) return `S${y - 1925}.${mo}.${d}`;
-        return `${y}.${mo}.${d}`;
-    }
-    return dateStr;
+    const one = toShortWarekiOne(core);
+    return (one || dateStr) + (koro ? '頃' : '');
 }
 
 // 本日の日付を「令和８年７月２４日」形式（全角数字）で返す
@@ -1613,8 +1688,10 @@ function preParaXml(text, jc, sz) {
 /**
  * 証拠説明書のdocxバイナリを生成する（事務所ひな形と同じレイアウト）。
  * rows: [{ gousho, title, copy, date, author, purpose }]
+ * options.remarks: true で簡裁・旧書式（末尾に「備考」列を追加）
  */
-function buildShoukoDocx(rows) {
+function buildShoukoDocx(rows, options) {
+    const remarks = !!(options && options.remarks);
     const NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
 
     // ── 前文（弁護士名・事件名・裁判所名は●●のまま。日付は本日） ──
@@ -1635,13 +1712,19 @@ function buildShoukoDocx(rows) {
     const hyomokuHeaderPara = ['標　　目', '（原本・写しの別）'].map(t =>
         `<w:p><w:pPr><w:spacing w:line="280" w:lineRule="exact"/><w:jc w:val="center"/><w:rPr><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr></w:pPr><w:r><w:rPr><w:rFonts w:hint="eastAsia"/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr><w:t>${t}</w:t></w:r></w:p>`).join('');
 
+    // 列幅（pct・合計5000）。備考列ありのときは立証趣旨を狭めて備考を追加。
+    const W = remarks
+        ? { purpose: 1300, remark: 496 }
+        : { purpose: 1796, remark: 0 };
+
     const headerRow =
         `<w:tr><w:trPr><w:trHeight w:val="486"/></w:trPr>` +
         tcXml(466, headerCellPara('号証')) +
         tcXml(1331, hyomokuHeaderPara, 2) +
         tcXml(626, headerCellPara('作成年月日')) +
         tcXml(781, headerCellPara('作　成　者')) +
-        tcXml(1796, headerCellPara('立　証　趣　旨')) +
+        tcXml(W.purpose, headerCellPara('立　証　趣　旨')) +
+        (remarks ? tcXml(W.remark, headerCellPara('備　考')) : '') +
         `</w:tr>`;
 
     const dataRows = rows.map(row =>
@@ -1651,15 +1734,20 @@ function buildShoukoDocx(rows) {
         tcXml(313, cellParaXml(row.copy)) +
         tcXml(626, cellParaXml(row.date)) +
         tcXml(781, cellParaXml(row.author)) +
-        tcXml(1796, cellParaXml(row.purpose)) +
+        tcXml(W.purpose, cellParaXml(row.purpose)) +
+        (remarks ? tcXml(W.remark, cellParaXml(row.remark || '')) : '') +
         `</w:tr>`
     ).join('');
+
+    const tblGrid = remarks
+        ? `<w:tblGrid><w:gridCol w:w="845"/><w:gridCol w:w="1845"/><w:gridCol w:w="567"/><w:gridCol w:w="1134"/><w:gridCol w:w="1415"/><w:gridCol w:w="2355"/><w:gridCol w:w="900"/></w:tblGrid>`
+        : `<w:tblGrid><w:gridCol w:w="845"/><w:gridCol w:w="1845"/><w:gridCol w:w="567"/><w:gridCol w:w="1134"/><w:gridCol w:w="1415"/><w:gridCol w:w="3255"/></w:tblGrid>`;
 
     const table =
         `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>` +
         `<w:tblBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tblBorders>` +
         `<w:tblCellMar><w:left w:w="52" w:type="dxa"/><w:right w:w="52" w:type="dxa"/></w:tblCellMar></w:tblPr>` +
-        `<w:tblGrid><w:gridCol w:w="845"/><w:gridCol w:w="1845"/><w:gridCol w:w="567"/><w:gridCol w:w="1134"/><w:gridCol w:w="1415"/><w:gridCol w:w="3255"/></w:tblGrid>` +
+        tblGrid +
         headerRow + dataRows + `</w:tbl>`;
 
     const sectPr =
@@ -1774,6 +1862,96 @@ async function ocrPdfBuffer(buffer, label) {
 }
 
 /**
+ * 現在の号証一覧から証拠説明書の各行（号証・標目・原本写し・作成年月日・作成者・立証趣旨）を組み立てる。
+ * 枝番まとめ・同種書類の日付括弧・同上継承・【要確認】付与を含む純粋関数（state.filesとsettingsを参照）。
+ */
+function computeShoukoRows() {
+    // Pass 1: 各ファイルの推測結果と号証番号
+    const numbering = computeNumbering();
+    const items = state.files.map((f, i) => ({
+        g: guessDocMeta(f),
+        ocr: !!f.ocrUsed,
+        main: numbering[i].mainNum,
+        branch: numbering[i].branchNum,
+        hasBranches: numbering[i].hasBranches,
+    }));
+
+    // Pass 2: 連続する同一主番号をまとめ、同種の枝番のみ（設定ONのとき）1行に統合
+    const mergeBranches = state.settings.mergeBranches === true;
+    const units = [];
+    for (const it of items) {
+        const last = units[units.length - 1];
+        if (last && last.main === it.main) last.items.push(it);
+        else units.push({ main: it.main, items: [it] });
+    }
+    const descriptors = [];
+    for (const u of units) {
+        const homogeneous = u.items.length > 1
+            && u.items.every(it => it.g.core && it.g.core === u.items[0].g.core && !it.g.datedTitle);
+        if (mergeBranches && homogeneous) {
+            descriptors.push({
+                rep: u.items[0], ocr: u.items.some(x => x.ocr), multi: true,
+                gousho: generateGoushoRangeLabel(u.main, u.items.map(x => x.branch), 'ないし'),
+            });
+        } else {
+            for (const it of u.items) {
+                const fmt = goushoNumFmt(it.main);
+                let gousho = `${getActualSymbol()}${fmt(it.main)}`;
+                if (it.hasBranches) gousho += `の${fmt(it.branch)}`;
+                descriptors.push({ rep: it, ocr: it.ocr, multi: false, gousho });
+            }
+        }
+    }
+
+    // 同種書類（日付付き書面でないもの）が複数あるかを数える（標目の日付括弧付置用）
+    const coreCount = {};
+    for (const d of descriptors) {
+        const g = d.rep.g;
+        if (!d.multi && !g.datedTitle && g.core) coreCount[g.core] = (coreCount[g.core] || 0) + 1;
+    }
+
+    // Pass 3: 各行のセルを組み立て（日付括弧・同上継承・【要確認】）
+    const rows = [];
+    let prevAuthorBase = '', prevPurpose = '';
+    for (const d of descriptors) {
+        const g = d.rep.g;
+        const ocr = d.ocr;
+
+        // 標目：同種書類が複数並ぶなら日付で識別（借用書（H26.9.24付）等）
+        let title = g.title;
+        if (!d.multi && !g.datedTitle && g.core && coreCount[g.core] >= 2 && g.date) {
+            title = `${g.core}（${toShortWareki(g.date)}付）`;
+        }
+        const titleUnsure = g.titleSource === 'fallback'
+            || ((g.titleSource === 'content' || g.titleSource === 'rule') && ocr);
+        if (!title) title = '【要確認】';
+        else if (titleUnsure) title += '【要確認】';
+
+        const copy = g.original ? '原本' : '写し';
+
+        // 作成年月日：拾えなければ【要確認】、OCR由来・枝番まとめ（各通あり）は値＋【要確認】
+        let date = g.date ? toShortWareki(g.date) : '';
+        if (!date) date = '【要確認】';
+        else if (ocr || d.multi) date += '【要確認】';
+
+        // 作成者：裏取り不可／機関名のみ／OCR由来は【要確認】。直前と同一なら「同上」
+        const authorBase = g.author || '';
+        let author = authorBase;
+        if (author && (!g.authorConfident || g.authorNeedsDetail || ocr)) author += '【要確認】';
+        if (authorBase && authorBase === prevAuthorBase) author = '同上';
+
+        // 立証趣旨：直前と同一なら「同上」
+        const purposeBase = g.purpose || '';
+        const purpose = (purposeBase && purposeBase === prevPurpose) ? '同上' : purposeBase;
+
+        rows.push({ gousho: d.gousho, title, copy, date, author, purpose });
+        prevAuthorBase = authorBase;
+        prevPurpose = purposeBase;
+    }
+    return rows;
+}
+
+/**
  * 証拠説明書の下書きをWord（.docx）で出力する。
  * テキスト層の無いスキャン・手書き書類は、その場でOCR（完全ローカル）して日付・標目を補う。
  * 号証番号・標目を自動記入し、作成年月日・作成者・立証趣旨は内容から推測できる範囲で仮埋めする。
@@ -1806,42 +1984,8 @@ async function exportShoukoSetsumeiWord() {
             }
         }
 
-        const rows = [];
-        for (let i = 0; i < state.files.length; i++) {
-            const f = state.files[i];
-            const guess = guessDocMeta(f);
-            const ocr = !!f.ocrUsed; // OCR由来は誤読の可能性があるため要確認扱い
-
-            // 標目：手がかり無し（fallback）、又は本文抽出/種別ラベルをOCRから得た場合は要確認
-            let title = guess.title;
-            const titleUnsure = guess.titleSource === 'fallback'
-                || ((guess.titleSource === 'content' || guess.titleSource === 'rule') && ocr);
-            if (!title) title = '【要確認】';
-            else if (titleUnsure) title += '【要確認】';
-
-            // 原本／写しの別：契約書・借用書・合意書・陳述書等は原本（事務所ルール）、他は写し
-            const copy = guess.original ? '原本' : '写し';
-
-            // 作成年月日：拾えなければ【要確認】、OCR由来なら値＋【要確認】
-            let date = guess.date ? toShortWareki(guess.date) : '';
-            if (!date) date = '【要確認】';
-            else if (ocr) date += '【要確認】';
-
-            // 作成者：本文で裏取りできない（ファイル名のみ）／OCR由来は正式表記の確認が要る
-            let author = guess.author || '';
-            if (author && (!guess.authorConfident || ocr)) author += '【要確認】';
-
-            rows.push({
-                gousho: generateGoushoLabel(i),
-                title,
-                copy,
-                date,
-                author,
-                purpose: guess.purpose,
-            });
-        }
-
-        const bytes = buildShoukoDocx(rows);
+        const rows = computeShoukoRows();
+        const bytes = buildShoukoDocx(rows, { remarks: state.settings.shoukoRemarks === true });
         const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
         const link = document.createElement('a');
         link.href = window.URL.createObjectURL(blob);
