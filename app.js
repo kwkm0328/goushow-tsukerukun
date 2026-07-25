@@ -1331,24 +1331,40 @@ function guessCompany(text) {
 }
 
 // 本文中の法人名を全て拾う（署名欄・差出人特定用）。
-// OCRは文字間に空白を入れるため空白を除去してから照合し、法人格＋名称本体を
-// 境界語（代表取締役・御中・様・句読点等）までで切り出す。
+// OCRは文字間に空白を入れるため空白を除去してから照合する。
+// 法人格の位置で「前置き型（株式会社○○）」と「後置き型（○○株式会社）」の両方に対応する。
+const COMPANY_BOUNDARY = '代表取締役|代表者|代表社員|代表理事|理事長|会長|社長|専務|常務|取締役|御中|様|殿|印|、|。|：|:';
 function allCompanies(text) {
     if (!text) return [];
     const t = text.replace(/[\s　]+/g, '');
-    const corp = new RegExp('(?:' + CORP_TOKENS + ')');
-    const boundary = /代表取締役|代表者|代表社員|代表理事|理事長|会長|社長|専務|常務|取締役|御中|様|殿|印|、|。/;
+    const corpRe = new RegExp('(?:' + CORP_TOKENS + ')', 'g');
+    const bnd = new RegExp(COMPANY_BOUNDARY);
+    const bndOrDigit = new RegExp(COMPANY_BOUNDARY + '|\\d', 'g');
     const out = [];
-    let idx = 0;
-    while (idx < t.length && out.length < 60) {
-        const m = t.slice(idx).match(corp);
-        if (!m) break;
-        const start = idx + m.index;
-        const after = t.slice(start + m[0].length);
-        let end = after.search(boundary);
-        if (end < 0 || end > 20) end = Math.min(20, after.length);
-        out.push(m[0] + after.slice(0, end));
-        idx = start + m[0].length + Math.max(end, 1);
+    let m;
+    while ((m = corpRe.exec(t)) && out.length < 60) {
+        const tok = m[0];
+        const tokStart = m.index, tokEnd = m.index + tok.length;
+
+        // 前置き型: 法人格の直後を名称とみなす（境界語まで、最大20字）
+        const after = t.slice(tokEnd);
+        let aEnd = after.search(bnd);
+        if (aEnd < 0 || aEnd > 20) aEnd = Math.min(20, after.length);
+        const afterName = after.slice(0, aEnd);
+
+        // 後置き型: 法人格の直前を名称とみなす（直近の境界語/数字より後、最大20字）
+        const before = t.slice(0, tokStart);
+        let bStart = Math.max(0, before.length - 20);
+        const bm = [...before.matchAll(bndOrDigit)];
+        if (bm.length) bStart = Math.max(bStart, bm[bm.length - 1].index + bm[bm.length - 1][0].length);
+        const beforeName = before.slice(bStart);
+
+        // 直後に名称文字が続けば前置き型、続かなければ後置き型として採用
+        if (afterName.length >= 1) out.push(tok + afterName);
+        else if (beforeName.length >= 2) out.push(beforeName + tok);
+        else out.push(tok);
+
+        corpRe.lastIndex = tokEnd;
     }
     return out;
 }
