@@ -1335,10 +1335,14 @@ function guessDocMeta(fileObj) {
     }
 
     // 標目：意味あるファイル名（書類名キーワードを含む）を優先。無ければ本文から抽出、それも無ければファイル名。
+    // titleSource: 'filename'（信頼）/ 'content'（本文抽出）/ 'fallback'（手がかり無し＝ファイル名のまま・要確認）
     const contentTitle = guessTitleFromContent(fullText);
-    const title = TITLE_KEYWORDS.test(name) ? name : (contentTitle || name);
+    let title, titleSource;
+    if (TITLE_KEYWORDS.test(name)) { title = name; titleSource = 'filename'; }
+    else if (contentTitle) { title = contentTitle; titleSource = 'content'; }
+    else { title = name; titleSource = 'fallback'; }
 
-    return { date: guessDate(name, fullText), author, purpose, title };
+    return { date: guessDate(name, fullText), author, purpose, title, titleSource };
 }
 
 // ── 証拠説明書のWord（.docx）出力 ──
@@ -1592,8 +1596,8 @@ let _ocrWorker = null;
 async function getOcrWorker() {
     if (typeof Tesseract === 'undefined') throw new Error('OCRエンジン(Tesseract.js)が読み込まれていません');
     if (!_ocrWorker) {
-        // 日本語モデル（初回のみCDNから言語データを取得。書類そのものは送信しない）
-        _ocrWorker = await Tesseract.createWorker('jpn');
+        // 日本語モデル（横書きjpn＋縦書きjpn_vert）。初回のみCDNから言語データを取得。書類そのものは送信しない。
+        _ocrWorker = await Tesseract.createWorker(['jpn', 'jpn_vert']);
     }
     return _ocrWorker;
 }
@@ -1663,21 +1667,37 @@ async function exportShoukoSetsumeiWord() {
                     } catch (e) {
                         console.warn('OCRに失敗:', f.originalName, e);
                     }
-                    f.ocrDone = true; // 二重OCR防止（次回出力時は再読取しない）
+                    f.ocrDone = true;  // 二重OCR防止（次回出力時は再読取しない）
+                    f.ocrUsed = true;  // OCR由来の値は要確認扱いにする
                 }
             }
         }
 
         const rows = [];
         for (let i = 0; i < state.files.length; i++) {
-            const guess = guessDocMeta(state.files[i]);
+            const f = state.files[i];
+            const guess = guessDocMeta(f);
+            const ocr = !!f.ocrUsed; // OCR由来は誤読の可能性があるため要確認扱い
+
+            // 標目：手がかり無し（fallback）、又はOCRで本文から拾った場合は要確認
+            let title = guess.title;
+            const titleUnsure = guess.titleSource === 'fallback' || (guess.titleSource === 'content' && ocr);
+            if (!title) title = '【要確認】';
+            else if (titleUnsure) title += '【要確認】';
+
             // 陳述書は原本提出が事務所ルール（原本が事務所にあるため）
             const copy = /陳述書/.test(guess.title) ? '原本' : '写し';
+
+            // 作成年月日：拾えなければ【要確認】、OCR由来なら値＋【要確認】
+            let date = guess.date ? toShortWareki(guess.date) : '';
+            if (!date) date = '【要確認】';
+            else if (ocr) date += '【要確認】';
+
             rows.push({
                 gousho: generateStampText(i),
-                title: guess.title,
+                title,
                 copy,
-                date: toShortWareki(guess.date),
+                date,
                 author: guess.author,
                 purpose: guess.purpose,
             });
