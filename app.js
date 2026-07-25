@@ -704,6 +704,17 @@ function generateStampText(index) {
     return base;
 }
 
+// 証拠説明書の号証欄用ラベル（例: 甲１、枝番は 甲１の２）。PDFスタンプと違い「号証」等の接尾辞は付けない。
+function generateGoushoLabel(index) {
+    const numbering = computeNumbering();
+    if (index < 0 || index >= numbering.length) return '';
+    const { mainNum, branchNum, hasBranches } = numbering[index];
+    const zen = (n) => String(n).replace(/[0-9]/g, c => String.fromCharCode(c.charCodeAt(0) + 0xFEE0)); // 全角数字
+    let base = `${getActualSymbol()}${zen(mainNum)}`;   // 甲１
+    if (hasBranches) base += `の${zen(branchNum)}`;      // 甲１の２
+    return base;
+}
+
 // mints等のファイル名規則対応: 禁止記号を除去し、拡張子込み50文字以内に収める
 function sanitizeFileName(name) {
     let base = name.replace(/[\\/:*?"<>|]/g, '_').trim();
@@ -1230,16 +1241,23 @@ async function processAndDownloadCombined() {
 // ── 証拠説明書下書きの推測ロジック ──
 
 // 書類種別ごとの既定値（ファイル名・本文に含まれる語で判定。上から順に優先）
+//   label : 標目に使う清書名（無ければファイル名/本文から抽出）
+//   issuer: true なら作成者＝発行法人（ファイル名・本文の会社名で補完）
+//   dated : true なら標目を「○年○月○日付＋書類名」にする（回答書・通知書等の往復書面）
 const DOC_TYPE_RULES = [
     { re: /賃貸借契約/, author: '当事者双方', purpose: '賃貸借契約締結の事実及びその内容' },
     { re: /雇用契約|労働契約/, author: '当事者双方', purpose: '雇用契約締結の事実及びその内容' },
     { re: /金銭消費貸借|借用証/, author: '当事者双方', purpose: '金銭消費貸借契約締結の事実及びその内容' },
     { re: /示談書|合意書|和解/, author: '当事者双方', purpose: '合意成立の事実及びその内容' },
     { re: /契約書|覚書/, author: '当事者双方', purpose: '契約締結の事実及びその内容' },
-    { re: /内容証明|催告書|通知書|受任通知/, author: '', purpose: '通知（催告）の事実及びその内容' },
-    { re: /請求書/, author: '', purpose: '請求の事実及びその金額' },
-    { re: /領収書|レシート/, author: '', purpose: '支払の事実及びその金額' },
-    { re: /見積/, author: '', purpose: '見積の内容' },
+    { re: /回答書/, label: '回答書', author: '', purpose: '照会（問い合わせ）に対する回答の内容', issuer: true, dated: true },
+    { re: /催告書/, label: '催告書', author: '', purpose: '催告の事実及びその内容', dated: true },
+    { re: /内容証明/, label: '内容証明郵便', author: '', purpose: '通知（催告）の事実及びその内容', dated: true },
+    { re: /受任通知/, label: '受任通知', author: '', purpose: '受任通知を発した事実及びその内容', dated: true },
+    { re: /通知書/, label: '通知書', author: '', purpose: '通知の事実及びその内容', dated: true },
+    { re: /請求書/, author: '', purpose: '請求の事実及びその金額', issuer: true },
+    { re: /領収書|レシート/, author: '', purpose: '支払の事実及びその金額', issuer: true },
+    { re: /見積/, author: '', purpose: '見積の内容', issuer: true },
     { re: /登記事項証明書|全部事項証明書|登記簿/, author: '法務局登記官', purpose: '本件不動産（法人）の登記上の権利関係' },
     { re: /戸籍|住民票/, author: '市区町村長', purpose: '当事者の身分関係（住所）' },
     { re: /診断書/, author: '医師', purpose: '傷病名、治療経過及び症状の内容' },
@@ -1302,47 +1320,139 @@ function guessTitleFromContent(text) {
     return '';
 }
 
-// 会社名・法人名らしき文字列を本文から1つ拾う（請求書・領収書等の作成者候補）
+// 法人格を含む語群（会社名抽出用）
+const CORP_TOKENS = '株式会社|有限会社|合同会社|合名会社|合資会社|一般社団法人|一般財団法人|公益社団法人|公益財団法人|社会福祉法人|弁護士法人|司法書士法人|税理士法人|行政書士法人|社会保険労務士法人|医療法人|学校法人|宗教法人|特定非営利活動法人|ＮＰＯ法人|NPO法人';
+
+// 会社名・法人名らしき文字列を1つ拾う（先頭一致。作成者候補）
 function guessCompany(text) {
-    const m = (text || '').match(/(株式会社|有限会社|合同会社|弁護士法人|司法書士法人|税理士法人|医療法人)[^\s、。，,()（）]{1,20}|[^\s、。，,()（）]{2,20}(株式会社|有限会社|合同会社)/);
+    const re = new RegExp('(?:' + CORP_TOKENS + ')[^\\s　、。，,()（）「」]{1,20}|[^\\s　、。，,()（）「」]{2,20}(?:株式会社|有限会社|合同会社)');
+    const m = (text || '').match(re);
     return m ? m[0] : '';
+}
+
+// 本文中の法人名を全て拾う（署名欄・差出人特定用）。
+// OCRは文字間に空白を入れるため空白を除去してから照合し、法人格＋名称本体を
+// 境界語（代表取締役・御中・様・句読点等）までで切り出す。
+function allCompanies(text) {
+    if (!text) return [];
+    const t = text.replace(/[\s　]+/g, '');
+    const corp = new RegExp('(?:' + CORP_TOKENS + ')');
+    const boundary = /代表取締役|代表者|代表社員|代表理事|理事長|会長|社長|専務|常務|取締役|御中|様|殿|印|、|。/;
+    const out = [];
+    let idx = 0;
+    while (idx < t.length && out.length < 60) {
+        const m = t.slice(idx).match(corp);
+        if (!m) break;
+        const start = idx + m.index;
+        const after = t.slice(start + m[0].length);
+        let end = after.search(boundary);
+        if (end < 0 || end > 20) end = Math.min(20, after.length);
+        out.push(m[0] + after.slice(0, end));
+        idx = start + m[0].length + Math.max(end, 1);
+    }
+    return out;
+}
+
+// 会社名の照合キー（中黒・空白を除く。「エスエムエス」と「エス・エム・エス」を同一視するため）
+function normCo(s) { return (s || '').replace(/[・･\s　]/g, ''); }
+
+// 作成者＝発行法人を推定する。ファイル名の会社名（利用者が付けた発行者）を手がかりに、
+// 本文中の正式名称（中黒付き等の正確な表記）があればそれを採用する。
+// 返り値 { author, confident }（confident=本文で裏取りできた／署名欄から取れた）
+function guessAuthorCompany(name, fullText) {
+    const contentCos = allCompanies(fullText);
+    const fnCo = guessCompany(name);
+    if (fnCo) {
+        const key = normCo(fnCo);
+        const hit = contentCos.find(c => { const n = normCo(c); return n === key || n.includes(key) || key.includes(n); });
+        if (hit) return { author: hit, confident: true };  // 本文の正式表記を優先（例: 株式会社エス・エム・エス）
+        return { author: fnCo, confident: false };          // ファイル名のみ＝正式表記は要確認
+    }
+    if (contentCos.length) return { author: contentCos[contentCos.length - 1], confident: true }; // 末尾＝署名欄想定
+    return { author: '', confident: false };
+}
+
+// ファイル名から標目に使う書類名だけを取り出す（会社名や末尾の日付数字等を落とす）。
+// 例: 「株式会社エスエムエス　回答書080724」→「回答書」
+function cleanFilenameTitle(name) {
+    const segs = name.split(/[\s　_]+/).filter(Boolean);
+    let seg = segs.find(s => TITLE_KEYWORDS.test(s));
+    if (!seg) seg = name;
+    seg = seg.replace(/\d{4,}$/, '').trim();        // 末尾の日付らしい数字列（080724等）を除去
+    seg = seg.replace(/^[（(【\[].*?[）)】\]]/, '').trim(); // 先頭の括弧書き（号証番号等）を除去
+    return seg || name;
+}
+
+// 日付文字列を「令和○年○月○日」形式（和暦フル）へ変換する（標目の日付前置き用）
+function toWarekiFull(dateStr) {
+    if (!dateStr) return '';
+    const s = dateStr.replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+    let m = s.match(/(令和|平成|昭和)(元|\d{1,2})年(\d{1,2})月(\d{1,2})日/);
+    if (m) {
+        const y = m[2] === '元' ? 1 : parseInt(m[2], 10);
+        return `${m[1]}${y}年${parseInt(m[3], 10)}月${parseInt(m[4], 10)}日`;
+    }
+    m = s.match(/((?:19|20)\d{2})年(\d{1,2})月(\d{1,2})日/);
+    if (m) {
+        const y = +m[1], mo = +m[2], d = +m[3];
+        let era, ey;
+        if (y > 2019 || (y === 2019 && mo >= 5)) { era = '令和'; ey = y - 2018; }
+        else if (y > 1989 || (y === 1989 && mo >= 1)) { era = '平成'; ey = y - 1988; }
+        else { era = '昭和'; ey = y - 1925; }
+        return `${era}${ey}年${mo}月${d}日`;
+    }
+    return '';
 }
 
 /**
  * 書類の内容（ファイル名＋抽出テキスト＝テキスト層又はOCR結果）から証拠説明書の各欄を推測する。
- * 日付・標目は全文から、種別・作成者は先頭付近から判定する。確実に分からない欄は空欄のまま返す。
+ * 日付・標目・作成者は全文から判定する。確実に分からない欄は空欄のまま返す。
+ * OCRは文字間に空白を挿入するため、種別判定は空白除去後のテキストで行う。
  */
 function guessDocMeta(fileObj) {
     const name = fileObj.originalName.replace(/\.[^.]+$/, '');
     const fullText = fileObj.extractedText || '';
-    const early = fullText.slice(0, 800);
-    const hay = name + '\n' + early;
+    // 種別判定用：ファイル名＋本文（先頭2000字）から空白を除いて照合（OCRの字間空白対策）
+    const hay = (name + '\n' + fullText.slice(0, 2000)).replace(/[\s　]+/g, '');
 
-    let author = '';
-    let purpose = '';
     let matchedRule = null;
     for (const rule of DOC_TYPE_RULES) {
         if (rule.re.test(hay)) { matchedRule = rule; break; }
     }
+
+    let author = '', purpose = '', authorConfident = false;
     if (matchedRule) {
         author = matchedRule.author;
         purpose = matchedRule.purpose;
+        if (author) authorConfident = true; // 「当事者双方」「法務局登記官」等の定型
+    }
+    // 発行者系（回答書・請求書・領収書等）は会社名を作成者に補完
+    if (!author && matchedRule && matchedRule.issuer) {
+        const a = guessAuthorCompany(name, fullText);
+        author = a.author;
+        authorConfident = a.confident;
     }
 
-    // 発行者系の書類は本文の法人名を作成者候補にする
-    if (!author && matchedRule && /請求書|領収書|レシート|見積|診療報酬|源泉徴収/.test(matchedRule.re.source)) {
-        author = guessCompany(fullText.slice(0, 3000));
+    const date = guessDate(name, fullText);
+
+    // 標目のコア（書類名）を決める。titleSource: 'rule'（種別ラベル）/ 'filename' / 'content' / 'fallback'
+    let coreName, titleSource;
+    if (matchedRule && matchedRule.label) {
+        coreName = matchedRule.label; titleSource = 'rule';
+    } else {
+        const contentTitle = guessTitleFromContent(fullText);
+        if (TITLE_KEYWORDS.test(name)) { coreName = cleanFilenameTitle(name); titleSource = 'filename'; }
+        else if (contentTitle) { coreName = contentTitle; titleSource = 'content'; }
+        else { coreName = name; titleSource = 'fallback'; }
     }
 
-    // 標目：意味あるファイル名（書類名キーワードを含む）を優先。無ければ本文から抽出、それも無ければファイル名。
-    // titleSource: 'filename'（信頼）/ 'content'（本文抽出）/ 'fallback'（手がかり無し＝ファイル名のまま・要確認）
-    const contentTitle = guessTitleFromContent(fullText);
-    let title, titleSource;
-    if (TITLE_KEYWORDS.test(name)) { title = name; titleSource = 'filename'; }
-    else if (contentTitle) { title = contentTitle; titleSource = 'content'; }
-    else { title = name; titleSource = 'fallback'; }
+    // 往復書面（回答書・通知書等）は「○年○月○日付＋書類名」を標目にする
+    let title = coreName;
+    if (matchedRule && matchedRule.dated && date) {
+        title = toWarekiFull(date) + '付' + coreName;
+    }
 
-    return { date: guessDate(name, fullText), author, purpose, title, titleSource };
+    return { date, author, authorConfident, purpose, title, titleSource };
 }
 
 // ── 証拠説明書のWord（.docx）出力 ──
@@ -1679,9 +1789,10 @@ async function exportShoukoSetsumeiWord() {
             const guess = guessDocMeta(f);
             const ocr = !!f.ocrUsed; // OCR由来は誤読の可能性があるため要確認扱い
 
-            // 標目：手がかり無し（fallback）、又はOCRで本文から拾った場合は要確認
+            // 標目：手がかり無し（fallback）、又は本文抽出/種別ラベルをOCRから得た場合は要確認
             let title = guess.title;
-            const titleUnsure = guess.titleSource === 'fallback' || (guess.titleSource === 'content' && ocr);
+            const titleUnsure = guess.titleSource === 'fallback'
+                || ((guess.titleSource === 'content' || guess.titleSource === 'rule') && ocr);
             if (!title) title = '【要確認】';
             else if (titleUnsure) title += '【要確認】';
 
@@ -1693,12 +1804,16 @@ async function exportShoukoSetsumeiWord() {
             if (!date) date = '【要確認】';
             else if (ocr) date += '【要確認】';
 
+            // 作成者：本文で裏取りできない（ファイル名のみ）／OCR由来は正式表記の確認が要る
+            let author = guess.author || '';
+            if (author && (!guess.authorConfident || ocr)) author += '【要確認】';
+
             rows.push({
-                gousho: generateStampText(i),
+                gousho: generateGoushoLabel(i),
                 title,
                 copy,
                 date,
-                author: guess.author,
+                author,
                 purpose: guess.purpose,
             });
         }
