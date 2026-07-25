@@ -705,13 +705,15 @@ function generateStampText(index) {
 }
 
 // 証拠説明書の号証欄用ラベル（例: 甲１、枝番は 甲１の２）。PDFスタンプと違い「号証」等の接尾辞は付けない。
+// 事務所慣例に合わせ、主番号が1桁なら全角（甲１）、2桁以上は半角（甲16）で統一する。
 function generateGoushoLabel(index) {
     const numbering = computeNumbering();
     if (index < 0 || index >= numbering.length) return '';
     const { mainNum, branchNum, hasBranches } = numbering[index];
     const zen = (n) => String(n).replace(/[0-9]/g, c => String.fromCharCode(c.charCodeAt(0) + 0xFEE0)); // 全角数字
-    let base = `${getActualSymbol()}${zen(mainNum)}`;   // 甲１
-    if (hasBranches) base += `の${zen(branchNum)}`;      // 甲１の２
+    const fmt = mainNum < 10 ? zen : (n) => String(n); // ラベル内は主番号の桁数で全角/半角を統一
+    let base = `${getActualSymbol()}${fmt(mainNum)}`;   // 甲１ / 甲16
+    if (hasBranches) base += `の${fmt(branchNum)}`;      // 甲１の２
     return base;
 }
 
@@ -1245,11 +1247,12 @@ async function processAndDownloadCombined() {
 //   issuer: true なら作成者＝発行法人（ファイル名・本文の会社名で補完）
 //   dated : true なら標目を「○年○月○日付＋書類名」にする（回答書・通知書等の往復書面）
 const DOC_TYPE_RULES = [
-    { re: /賃貸借契約/, author: '当事者双方', purpose: '賃貸借契約締結の事実及びその内容' },
-    { re: /雇用契約|労働契約/, author: '当事者双方', purpose: '雇用契約締結の事実及びその内容' },
-    { re: /金銭消費貸借|借用証/, author: '当事者双方', purpose: '金銭消費貸借契約締結の事実及びその内容' },
-    { re: /示談書|合意書|和解/, author: '当事者双方', purpose: '合意成立の事実及びその内容' },
-    { re: /契約書|覚書/, author: '当事者双方', purpose: '契約締結の事実及びその内容' },
+    { re: /賃貸借契約/, author: '当事者双方', purpose: '賃貸借契約締結の事実及びその内容', original: true },
+    { re: /雇用契約|労働契約/, author: '当事者双方', purpose: '雇用契約締結の事実及びその内容', original: true },
+    { re: /金銭消費貸借|借用書|借用証/, author: '当事者双方', purpose: '金銭消費貸借契約締結の事実及びその内容', original: true },
+    { re: /示談書|合意書|和解書|誓約書/, author: '当事者双方', purpose: '合意成立の事実及びその内容', original: true },
+    { re: /承諾書|念書/, author: '', purpose: '承諾（合意）の事実及びその内容', original: true },
+    { re: /契約書|覚書/, author: '当事者双方', purpose: '契約締結の事実及びその内容', original: true },
     { re: /回答書/, label: '回答書', author: '', purpose: '照会（問い合わせ）に対する回答の内容', issuer: true, dated: true },
     { re: /催告書/, label: '催告書', author: '', purpose: '催告の事実及びその内容', dated: true },
     { re: /内容証明/, label: '内容証明郵便', author: '', purpose: '通知（催告）の事実及びその内容', dated: true },
@@ -1258,12 +1261,13 @@ const DOC_TYPE_RULES = [
     { re: /請求書/, author: '', purpose: '請求の事実及びその金額', issuer: true },
     { re: /領収書|レシート/, author: '', purpose: '支払の事実及びその金額', issuer: true },
     { re: /見積/, author: '', purpose: '見積の内容', issuer: true },
-    { re: /登記事項証明書|全部事項証明書|登記簿/, author: '法務局登記官', purpose: '本件不動産（法人）の登記上の権利関係' },
-    { re: /戸籍|住民票/, author: '市区町村長', purpose: '当事者の身分関係（住所）' },
+    { re: /交通事故証明|事故証明書/, label: '交通事故証明書', author: '自動車安全運転センター', purpose: '本件事故の発生日時、場所及び当事者' },
+    { re: /登記事項証明書|全部事項証明書|登記簿|登記情報/, author: '法務局登記官', purpose: '本件不動産（法人）の登記上の権利関係' },
+    { re: /戸籍|除籍|住民票/, author: '市区町村長', purpose: '当事者の身分関係（住所）' },
     { re: /診断書/, author: '医師', purpose: '傷病名、治療経過及び症状の内容' },
     { re: /診療報酬明細|レセプト/, author: '医療機関', purpose: '治療内容及び治療費の額' },
     { re: /源泉徴収票|給与明細|課税証明/, author: '', purpose: '収入の額' },
-    { re: /陳述書/, author: '', purpose: '本件の経緯' },
+    { re: /陳述書/, author: '', purpose: '本件の経緯', original: true },
     { re: /議事録/, author: '', purpose: '会議における協議・決議の内容' },
     { re: /就業規則/, author: '', purpose: '就業規則の定めの内容' },
     { re: /メール|LINE|ライン|チャット|メッセージ/, author: '', purpose: '当事者間のやり取りの存在及びその内容' },
@@ -1468,7 +1472,10 @@ function guessDocMeta(fileObj) {
         title = toWarekiFull(date) + '付' + coreName;
     }
 
-    return { date, author, authorConfident, purpose, title, titleSource };
+    // 原本／写しの別：契約書・借用書・合意書・陳述書等（事務所ルールで原本提出）は原本、他は写し
+    const original = !!(matchedRule && matchedRule.original);
+
+    return { date, author, authorConfident, purpose, title, titleSource, original };
 }
 
 // ── 証拠説明書のWord（.docx）出力 ──
@@ -1812,8 +1819,8 @@ async function exportShoukoSetsumeiWord() {
             if (!title) title = '【要確認】';
             else if (titleUnsure) title += '【要確認】';
 
-            // 陳述書は原本提出が事務所ルール（原本が事務所にあるため）
-            const copy = /陳述書/.test(guess.title) ? '原本' : '写し';
+            // 原本／写しの別：契約書・借用書・合意書・陳述書等は原本（事務所ルール）、他は写し
+            const copy = guess.original ? '原本' : '写し';
 
             // 作成年月日：拾えなければ【要確認】、OCR由来なら値＋【要確認】
             let date = guess.date ? toShortWareki(guess.date) : '';
