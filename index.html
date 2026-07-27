@@ -9,12 +9,11 @@
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&family=Noto+Serif+JP:wght@400&display=swap" rel="stylesheet">
     
     <!-- PDF libraries -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-    <script src="https://unpkg.com/@pdf-lib/fontkit/dist/fontkit.umd.min.js"></script>
     <!-- Document conversion libraries -->
     <script src="https://unpkg.com/mammoth@1.6.0/mammoth.browser.min.js"></script>
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
@@ -22,14 +21,14 @@
     <!-- OCR（スキャン・手書き書類の文字読み取り。完全ローカル処理・書類データは外部送信しない） -->
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
-    <link rel="stylesheet" href="styles.css?v=20260725h">
+    <link rel="stylesheet" href="styles.css?v=20260727">
 </head>
 <body>
     <div class="app-container">
         <!-- Sidebar Options -->
         <aside class="sidebar glass-panel">
             <h1 class="app-title"><span class="icon">📄</span>号証つけるくん</h1>
-            <p class="app-subtitle">証拠番号 自動付与ツール <span style="display:inline-block;font-size:0.72em;color:#16a34a;border:1px solid #16a34a;border-radius:4px;padding:0 5px;vertical-align:middle;">v2026.07.25h 実務パターン全対応（日付括弧・同上・枝番まとめ等）</span></p>
+            <p class="app-subtitle">証拠番号 自動付与ツール <span style="display:inline-block;font-size:0.72em;color:#16a34a;border:1px solid #16a34a;border-radius:4px;padding:0 5px;vertical-align:middle;">v2026.07.27 スタンプ表示不具合修正（Acrobat互換）</span></p>
             
             <div class="settings-group">
                 <h3>1. 符号・番号設定</h3>
@@ -252,6 +251,6 @@
     </div>
 
     <!-- Script loading -->
-    <script src="app.js?v=20260725h"></script>
+    <script src="app.js?v=20260727"></script>
 </body>
 </html>

@@ -1027,48 +1027,88 @@ async function mergePdfDocs(docs) {
     return out;
 }
 
-async function ensureFontkit() {
-    if (window.fontkit) return;
-    await new Promise((resolve) => {
-        const script = document.createElement('script');
-        script.src = 'https://unpkg.com/@pdf-lib/fontkit/dist/fontkit.umd.min.js';
-        script.onload = resolve;
-        document.head.appendChild(script);
-    });
-}
+// pdf-lib/fontkitによるCJK OTFのサブセット埋込みは、Acrobatで
+// 「埋め込みフォントを抽出できません」と警告される場合がある。
+// スタンプ文字だけを高解像度の透過PNGにして埋め込み、元PDFの文字層は維持する。
+const STAMP_IMAGE_SCALE = 4; // PDF上の1ptを4px（288dpi相当）で描画
+const stampImageCache = new Map();
 
-// フォントは1回だけ取得してキャッシュ（従来はファイルごとに毎回ダウンロードしていた）
-const stampFontCache = {};
-async function getStampFontBytes() {
-    const key = state.settings.fontFamily === 'mincho' ? 'mincho' : 'gothic';
-    if (!stampFontCache[key]) {
-        const fontUrl = key === 'mincho'
-            ? 'https://raw.githubusercontent.com/notofonts/noto-cjk/main/Serif/OTF/Japanese/NotoSerifCJKjp-Regular.otf'
-            : 'https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf';
-        stampFontCache[key] = await fetch(fontUrl).then(res => res.arrayBuffer());
+async function createStampTextImage(pdfDoc, text, size) {
+    const isMincho = state.settings.fontFamily === 'mincho';
+    const primaryFont = isMincho ? 'Noto Serif JP' : 'Noto Sans JP';
+    const fontFamily = isMincho
+        ? `"${primaryFont}", "Yu Mincho", "MS Mincho", serif`
+        : `"${primaryFont}", "Yu Gothic", "Meiryo", sans-serif`;
+    const cacheKey = [
+        text,
+        size,
+        state.settings.fontFamily,
+        state.settings.color
+    ].join('\u0000');
+
+    if (!stampImageCache.has(cacheKey)) {
+        // Webフォントを待つ。取得できない場合も端末の日本語フォントへ安全にフォールバックする。
+        if (document.fonts && document.fonts.load) {
+            try {
+                await document.fonts.load(`${size}px "${primaryFont}"`, text);
+            } catch (err) {
+                console.warn('スタンプ用Webフォントの読込みに失敗したため、端末フォントを使用します:', err);
+            }
+        }
+
+        const scale = STAMP_IMAGE_SCALE;
+        const scaledSize = size * scale;
+        const measureCanvas = document.createElement('canvas');
+        const measureCtx = measureCanvas.getContext('2d');
+        measureCtx.font = `${scaledSize}px ${fontFamily}`;
+        const metrics = measureCtx.measureText(text);
+
+        const innerPad = scale * 0.5;
+        const textHeight = size * 1.15;
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.ceil(metrics.width + innerPad * 2));
+        canvas.height = Math.max(1, Math.ceil(textHeight * scale));
+
+        const ctx = canvas.getContext('2d');
+        ctx.font = `${scaledSize}px ${fontFamily}`;
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillStyle = state.settings.color;
+
+        const ascent = metrics.actualBoundingBoxAscent || scaledSize * 0.88;
+        const descent = metrics.actualBoundingBoxDescent || scaledSize * 0.12;
+        const baseline = (canvas.height - ascent - descent) / 2 + ascent;
+        ctx.fillText(text, innerPad, baseline);
+
+        const pngBytes = Uint8Array.from(
+            atob(canvas.toDataURL('image/png').split(',')[1]),
+            c => c.charCodeAt(0)
+        );
+        stampImageCache.set(cacheKey, {
+            pngBytes,
+            width: canvas.width / scale,
+            height: canvas.height / scale
+        });
     }
-    return stampFontCache[key];
+
+    const cached = stampImageCache.get(cacheKey);
+    return {
+        image: await pdfDoc.embedPng(cached.pngBytes),
+        width: cached.width,
+        height: cached.height
+    };
 }
 
 async function addStampToPdfDoc(pdfDoc, text) {
     const { rgb } = PDFLib;
-
-    const fontBytes = await getStampFontBytes();
-
-    pdfDoc.registerFontkit(window.fontkit); // Requires fontkit to be loaded
-    // subset: true が無いとフォント全体(約13MB)が埋め込まれ、mintsの容量制限に抵触する
-    const customFont = await pdfDoc.embedFont(fontBytes, { subset: true });
 
     const pages = pdfDoc.getPages();
     const firstPage = pages[0];
     const { width, height } = firstPage.getSize();
     
     const size = state.settings.fontSize;
-    const textWidth = customFont.widthOfTextAtSize(text, size);
-    // pdf-lib's heightAtSize for these CJK fonts includes massive ascender space.
-    // Use a tighter visual bounding box based on the font size for the background/border.
-    const textHeight = size * 1.15; 
-    const baselineOffset = size * 0.12; // Shift baseline up from the bottom of the box
+    const stampTextImage = await createStampTextImage(pdfDoc, text, size);
+    const textWidth = stampTextImage.width;
+    const textHeight = stampTextImage.height;
     
     const colorRGB = hexToRgb(state.settings.color);
     const stampColor = rgb(colorRGB.r, colorRGB.g, colorRGB.b);
@@ -1135,12 +1175,11 @@ async function addStampToPdfDoc(pdfDoc, text) {
         });
     }
 
-    firstPage.drawText(text, {
+    firstPage.drawImage(stampTextImage.image, {
         x: boxLeft + PADDING,
-        y: boxBottomY + PADDING + baselineOffset, 
-        size: size,
-        font: customFont,
-        color: stampColor,
+        y: boxBottomY + PADDING,
+        width: textWidth,
+        height: textHeight,
     });
 }
 
@@ -1169,8 +1208,6 @@ async function processAndDownloadIndividual() {
     DOM.downloadIndividualBtn.disabled = true;
 
     try {
-        await ensureFontkit();
-
         for (let i = 0; i < state.files.length; i++) {
             const fileObj = state.files[i];
             const text = generateStampText(i);
@@ -1219,8 +1256,6 @@ async function processAndDownloadCombined() {
     DOM.downloadCombinedBtn.disabled = true;
 
     try {
-        await ensureFontkit();
-
         // 親番号（mainNum）ごとに、連続した枝番グループを作る
         const numbering = computeNumbering();
         const groups = [];
